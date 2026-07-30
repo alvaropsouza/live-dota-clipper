@@ -4,7 +4,13 @@ import tsparser from "@typescript-eslint/parser"
 export default [
   {
     files: ["**/*.ts", "**/*.tsx"],
-    languageOptions: { parser: tsparser },
+    languageOptions: {
+      parser: tsparser,
+      parserOptions: {
+        project: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     plugins: { "@typescript-eslint": tseslint },
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
@@ -12,7 +18,7 @@ export default [
       "@typescript-eslint/no-unused-vars": "error",
       "@typescript-eslint/consistent-type-imports": "error",
       "@typescript-eslint/no-misused-promises": "error",
-      "prefer-nullish-coalescing": "error",
+      "@typescript-eslint/prefer-nullish-coalescing": "error",
       eqeqeq: "error",
     },
   },

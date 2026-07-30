@@ -1,7 +1,9 @@
 import { createClient } from "@libsql/client"
+import { mkdir } from "node:fs/promises"
 import path from "node:path"
 
 const dbPath = path.resolve(process.env["DB_PATH"] ?? "./data/app.db")
+await mkdir(path.dirname(dbPath), { recursive: true })
 
 export const db = createClient({ url: `file:${dbPath}` })
 

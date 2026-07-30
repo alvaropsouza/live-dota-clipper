@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@dota-vod/shared": "workspace:*",
+    "@libsql/client": "^0.14.0",
     "bullmq": "^5.0.0",
     "pino": "^9.0.0"
   },
