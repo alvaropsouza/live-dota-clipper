@@ -26,7 +26,7 @@ type Job = {
   finishedAt?: string
   progress: number
 }
-type CutFile = { id: string; path: string; name: string; type: string; url: string }
+type CutFile = { id: string; path: string; name: string; type: string; extracting: boolean; url: string }
 
 function youtubeThumb(url: string): { max: string; fallback: string } | null {
   try {
@@ -270,6 +270,7 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
       return res.json() as Promise<CutFile[]>
     },
     enabled: data?.status === "done",
+    refetchInterval: (q) => q.state.data?.some((f) => f.extracting) ? 2000 : false,
   })
 
   const deleteMutation = useMutation({
@@ -294,6 +295,34 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
       void queryClient.invalidateQueries({ queryKey: ["job", jobId] })
     },
   })
+
+  const [selectedMatchIds, setSelectedMatchIds] = useState<Set<string>>(new Set())
+  const [extractStep, setExtractStep] = useState<{ current: number; total: number } | null>(null)
+  const [highlightDuration, setHighlightDuration] = useState(60)
+
+  const serverExtracting = files?.some((f) => f.extracting) ?? false
+  const extracting = serverExtracting || extractStep !== null
+
+  async function extractHighlights() {
+    const ids = [...selectedMatchIds]
+    setExtractStep({ current: 1, total: ids.length })
+    for (let i = 0; i < ids.length; i++) {
+      setExtractStep({ current: i + 1, total: ids.length })
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/files/${ids[i]}/detect-highlights`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ maxDuration: highlightDuration }),
+        })
+        if (!res.ok) console.error(`highlight extraction failed for ${ids[i]}: ${await res.text()}`)
+      } catch (e) {
+        console.error(e)
+      }
+      void queryClient.invalidateQueries({ queryKey: ["files", jobId] })
+    }
+    setExtractStep(null)
+    setSelectedMatchIds(new Set())
+  }
 
   const status = isError ? "failed" : (data?.status ?? "pending")
   const isDone = status === "done"
@@ -402,62 +431,162 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
             const matches    = files.filter((f) => f.type !== "highlight")
             const highlights = files.filter((f) => f.type === "highlight")
 
-            const FileCard = ({ f, label, badge }: { f: CutFile; label: string; badge: string }) => (
-              <a
-                key={f.id}
-                href={f.url}
-                download={f.name}
-                className="group flex flex-col overflow-hidden rounded-lg border border-border hover:border-primary transition-colors duration-150 hover:-translate-y-px"
-                style={{ transitionProperty: "border-color, transform", transitionDuration: "150ms" }}
-              >
-                <div className="relative h-16 overflow-hidden" style={{ background: "var(--surface-2)" }}>
-                  <img
-                    src={`/api/jobs/${jobId}/output/${f.name}/thumb`}
-                    alt={label}
-                    loading="lazy"
-                    className="absolute inset-0 w-full h-full object-cover"
-                  />
-                  <div
-                    className="absolute inset-0"
-                    style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }}
-                  />
-                  <span className="absolute bottom-1.5 left-2 text-[15px] font-black text-white leading-none">
-                    {badge}
-                  </span>
-                  <div className="absolute inset-0 flex items-center justify-center bg-primary opacity-0 group-hover:opacity-90 transition-opacity duration-150">
-                    <span className="text-[11px] font-semibold text-primary-fg">⬇ Baixar</span>
-                  </div>
-                </div>
-                <div className="px-2 py-1.5 bg-surface">
-                  <p className="text-[11px] font-medium text-ink">{label}</p>
-                  <p className="text-[10px] text-muted truncate">{f.name}</p>
-                </div>
-              </a>
-            )
+            const toggleMatch = (id: string) => {
+              setSelectedMatchIds((prev) => {
+                const next = new Set(prev)
+                next.has(id) ? next.delete(id) : next.add(id)
+                return next
+              })
+            }
 
             return (
               <>
                 {matches.length > 0 && (
                   <>
-                    <p className="text-[11px] font-medium text-muted mb-2.5">
-                      {matches.length} partida{matches.length !== 1 ? "s" : ""} detectada{matches.length !== 1 ? "s" : ""}
-                    </p>
+                    <div className="flex items-center justify-between mb-2.5">
+                      <p className="text-[11px] font-medium text-muted">
+                        {matches.length} partida{matches.length !== 1 ? "s" : ""} detectada{matches.length !== 1 ? "s" : ""}
+                      </p>
+                      {(selectedMatchIds.size > 0 || extracting) && (
+                        <div className="flex items-center gap-1.5">
+                          {!extracting && (
+                            <div className="flex items-center gap-1 rounded-md border border-border px-2" style={{ background: "var(--surface-2)" }}>
+                              <label htmlFor="hl-dur" className="text-[10px] text-muted whitespace-nowrap">máx</label>
+                              <input
+                                id="hl-dur"
+                                type="number"
+                                min={20}
+                                max={300}
+                                value={highlightDuration}
+                                onChange={(e) => setHighlightDuration(Math.max(20, Math.min(300, Number(e.target.value))))}
+                                className="w-10 text-[11px] text-ink bg-transparent border-none outline-none text-right"
+                                style={{ fontFamily: "inherit" }}
+                              />
+                              <span className="text-[10px] text-muted">s</span>
+                            </div>
+                          )}
+                          <button
+                            onClick={() => void extractHighlights()}
+                            disabled={extracting}
+                            className="text-[11px] font-semibold px-2.5 py-1 rounded-md transition-colors duration-150 disabled:opacity-80"
+                            style={{ background: "var(--primary)", color: "var(--primary-fg)", border: "none", cursor: extracting ? "default" : "pointer", fontFamily: "inherit" }}
+                          >
+                            {extractStep
+                              ? `✦ Extraindo ${extractStep.current}/${extractStep.total}…`
+                              : serverExtracting
+                              ? "✦ Extraindo…"
+                              : `✦ Extrair highlights (${selectedMatchIds.size})`}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     <div className="grid gap-2 mb-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}>
-                      {matches.map((f, i) => (
-                        <FileCard key={f.id} f={f} label={`Partida ${i + 1}`} badge={String(i + 1)} />
-                      ))}
+                      {matches.map((f, i) => {
+                        const selected = selectedMatchIds.has(f.id)
+                        const isActive = f.extracting
+                        return (
+                          <div key={f.id} className="flex flex-col overflow-hidden rounded-lg border transition-colors duration-150"
+                            style={{ borderColor: isActive || selected ? "var(--primary)" : "var(--border)" }}
+                          >
+                            <button
+                              onClick={() => !extracting && toggleMatch(f.id)}
+                              className="relative h-16 overflow-hidden w-full p-0 border-none"
+                              style={{ background: "var(--surface-2)", cursor: extracting ? "default" : "pointer" }}
+                              aria-pressed={selected}
+                              aria-label={`Selecionar partida ${i + 1}`}
+                            >
+                              <img src={`/api/jobs/${jobId}/output/${f.name}/thumb`} alt={`Partida ${i + 1}`} loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
+                              <div className="absolute inset-0" style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }} />
+                              <span className="absolute bottom-1.5 left-2 text-[15px] font-black text-white leading-none">{i + 1}</span>
+                              {isActive && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center gap-1" style={{ background: "oklch(0 0 0 / 0.62)" }}>
+                                  <svg className="animate-spin" width="18" height="18" viewBox="0 0 18 18" fill="none">
+                                    <circle cx="9" cy="9" r="7" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
+                                    <path d="M9 2a7 7 0 0 1 7 7" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                  </svg>
+                                  <span style={{ fontSize: 9, fontWeight: 700, color: "white", letterSpacing: "0.05em" }}>DETECTANDO</span>
+                                </div>
+                              )}
+                              {!extracting && (
+                                <div className="absolute top-1.5 right-1.5 w-4 h-4 rounded flex items-center justify-center"
+                                  style={{
+                                    background: selected ? "var(--primary)" : "oklch(0 0 0 / 0.45)",
+                                    border: `1.5px solid ${selected ? "var(--primary)" : "rgba(255,255,255,0.6)"}`,
+                                    transition: "background 0.15s, border-color 0.15s",
+                                  }}
+                                >
+                                  {selected && <CheckIcon />}
+                                </div>
+                              )}
+                            </button>
+                            <div className="px-2 py-1.5 bg-surface flex items-center justify-between gap-1">
+                              <div className="min-w-0">
+                                <p className="text-[11px] font-medium text-ink">Partida {i + 1}</p>
+                                <p className="text-[10px] text-muted truncate">{f.name}</p>
+                              </div>
+                              <a href={f.url} download={f.name} aria-label="Baixar"
+                                className="shrink-0 text-dim hover:text-ink transition-colors duration-150"
+                                style={{ fontSize: 13 }}
+                              >⬇</a>
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
                   </>
                 )}
 
                 {highlights.length > 0 && (
                   <>
-                    <p className="text-[11px] font-medium text-muted mb-2.5">
-                      {highlights.length} highlight{highlights.length !== 1 ? "s" : ""}
-                    </p>
+                    <div className="flex items-center justify-between mb-2.5">
+                      <p className="text-[11px] font-medium text-muted">
+                        {highlights.length} highlight{highlights.length !== 1 ? "s" : ""}
+                      </p>
+                      <button
+                        onClick={async () => {
+                          await fetch(`/api/jobs/${jobId}/highlights`, { method: "DELETE" })
+                          void queryClient.invalidateQueries({ queryKey: ["files", jobId] })
+                        }}
+                        className="text-[10px] transition-colors duration-150"
+                        style={{ background: "none", border: "none", cursor: "pointer", color: "var(--dim)", fontFamily: "inherit" }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--error)" }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--dim)" }}
+                      >
+                        remover todos
+                      </button>
+                    </div>
                     <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}>
                       {highlights.map((f, i) => (
-                        <FileCard key={f.id} f={f} label={`Highlight ${i + 1}`} badge={`H${i + 1}`} />
+                        <div key={f.id} className="group flex flex-col overflow-hidden rounded-lg border border-border hover:border-primary transition-colors duration-150">
+                          <a href={f.url} download={f.name} className="relative h-16 overflow-hidden block" style={{ background: "var(--surface-2)" }}>
+                            <img
+                              src={`/api/jobs/${jobId}/output/${f.name}/thumb`}
+                              alt={`Highlight ${i + 1}`}
+                              loading="lazy"
+                              className="absolute inset-0 w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0" style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }} />
+                            <span className="absolute bottom-1.5 left-2 text-[13px] font-black text-white leading-none">H{i + 1}</span>
+                            <div className="absolute inset-0 flex items-center justify-center bg-primary opacity-0 group-hover:opacity-90 transition-opacity duration-150">
+                              <span className="text-[11px] font-semibold text-primary-fg">⬇ Baixar</span>
+                            </div>
+                          </a>
+                          <div className="px-2 py-1.5 bg-surface flex items-center justify-between gap-1">
+                            <div className="min-w-0">
+                              <p className="text-[11px] font-medium text-ink">Highlight {i + 1}</p>
+                              <p className="text-[10px] text-muted truncate">{f.name}</p>
+                            </div>
+                            <button
+                              onClick={async () => {
+                                await fetch(`/api/jobs/${jobId}/files/${f.id}`, { method: "DELETE" })
+                                void queryClient.invalidateQueries({ queryKey: ["files", jobId] })
+                              }}
+                              aria-label="Remover highlight"
+                              className="shrink-0 text-dim hover:text-error transition-colors duration-150"
+                              style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, padding: 0, fontFamily: "inherit" }}
+                            >✕</button>
+                          </div>
+                        </div>
                       ))}
                     </div>
                   </>

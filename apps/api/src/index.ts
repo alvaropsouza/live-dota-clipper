@@ -9,6 +9,7 @@ import { db } from "@/db"
 
 const TMP_DIR = path.resolve(process.env["TMP_DIR"] ?? "../../data/tmp")
 const FFMPEG = process.env["FFMPEG_PATH"] ?? "ffmpeg"
+const PYTHON_URL = process.env["PYTHON_URL"] ?? "http://localhost:8000"
 
 const logger = pino({
   name: "api",
@@ -81,7 +82,7 @@ app.post("/jobs/:id/retry", async (request, reply) => {
   const { id } = request.params as { id: string }
   const jobDir = path.join(TMP_DIR, `job-${id}`)
 
-  const { targetStatus } = (request.body ?? {}) as { targetStatus?: string }
+  const { targetStatus } = (request.body ?? {}) as { targetStatus?: string; maxDuration?: number }
 
   let resumeStatus: string
   if (targetStatus) {
@@ -129,6 +130,7 @@ app.get("/jobs/:id/files", async (request) => {
     path: r.path,
     name: path.basename(r.path as string),
     type: r.type ?? "match",
+    extracting: r.extracting === 1,
     url: `/api/jobs/${id}/output/${path.basename(r.path as string)}`,
   }))
 })
@@ -188,6 +190,92 @@ app.get("/jobs/:id/output/:filename", async (request, reply) => {
   } catch {
     return reply.code(404).send({ error: "not found" })
   }
+})
+
+app.delete("/jobs/:id/highlights", async (request, reply) => {
+  const { id } = request.params as { id: string }
+  const rows = await db.execute({ sql: `SELECT id, path FROM files WHERE jobId = ? AND type = 'highlight'`, args: [id] })
+  await db.execute({ sql: `DELETE FROM files WHERE jobId = ? AND type = 'highlight'`, args: [id] })
+  const { rm } = await import("node:fs/promises")
+  await Promise.allSettled(rows.rows.map((r) => rm(r.path as string, { force: true })))
+  logger.info({ jobId: id, count: rows.rows.length }, "all highlights deleted")
+  return reply.code(204).send()
+})
+
+app.delete("/jobs/:id/files/:fileId", async (request, reply) => {
+  const { id, fileId } = request.params as { id: string; fileId: string }
+  const row = await db.execute({ sql: `SELECT path FROM files WHERE id = ? AND jobId = ?`, args: [fileId, id] })
+  if (!row.rows[0]) return reply.code(404).send({ error: "not found" })
+  const filePath = row.rows[0].path as string
+  await db.execute({ sql: `DELETE FROM files WHERE id = ?`, args: [fileId] })
+  await import("node:fs/promises").then((m) => m.rm(filePath, { force: true }))
+  logger.info({ jobId: id, fileId, filePath }, "file deleted")
+  return reply.code(204).send()
+})
+
+app.post("/jobs/:id/files/:fileId/detect-highlights", async (request, reply) => {
+  const { id, fileId } = request.params as { id: string; fileId: string }
+  const { maxDuration } = (request.body ?? {}) as { maxDuration?: number }
+
+  const row = await db.execute({
+    sql: `SELECT * FROM files WHERE id = ? AND jobId = ? AND type = 'match'`,
+    args: [fileId, id],
+  })
+  const file = row.rows[0]
+  if (!file) return reply.code(404).send({ error: "match file not found" })
+
+  const filePath = file.path as string
+  const matchNum = parseInt(path.basename(filePath).replace("match", "").replace(".mp4", ""), 10) || 1
+
+  await db.execute({ sql: `UPDATE files SET extracting = 1 WHERE id = ?`, args: [fileId] })
+
+  let highlights: Array<{ highlight: number; match: number; start: string; end: string }>
+  try {
+    const pyRes = await fetch(`${PYTHON_URL}/detect-highlights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoPath: filePath, matchNum, jobId: id, maxDuration }),
+    })
+    if (!pyRes.ok) {
+      const text = await pyRes.text()
+      await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+      return reply.code(502).send({ error: `vision service: ${text}` })
+    }
+    const body = await pyRes.json() as { highlights: Array<{ highlight: number; match: number; start: string; end: string }> }
+    highlights = body.highlights
+  } catch (err) {
+    await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+    throw err
+  }
+
+  if (highlights.length === 0) return reply.send({ highlights: [] })
+
+  const hlDir = path.join(path.dirname(filePath), "highlights")
+  await import("node:fs/promises").then((m) => m.mkdir(hlDir, { recursive: true }))
+
+  const created: Array<{ id: string; name: string }> = []
+
+  for (const hl of highlights) {
+    const hlName = `match${String(matchNum).padStart(3, "0")}_hl${String(hl.highlight).padStart(3, "0")}.mp4`
+    const hlPath = path.join(hlDir, hlName)
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(FFMPEG, ["-ss", hl.start, "-to", hl.end, "-i", filePath, "-c", "copy", "-y", hlPath])
+      proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${String(code)}`)))
+      proc.on("error", reject)
+    })
+
+    const hlId = crypto.randomUUID()
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO files (id, jobId, path, duration, type) VALUES (?, ?, ?, NULL, 'highlight')`,
+      args: [hlId, id, hlPath],
+    })
+    created.push({ id: hlId, name: hlName })
+  }
+
+  await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+  logger.info({ jobId: id, fileId, count: created.length }, "highlights extracted on demand")
+  return reply.send({ highlights: created })
 })
 
 app.delete("/jobs/:id", async (request, reply) => {

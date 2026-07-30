@@ -21,17 +21,22 @@ await db.executeMultiple(`
   );
 
   CREATE TABLE IF NOT EXISTS files (
-    id        TEXT PRIMARY KEY,
-    jobId     TEXT NOT NULL REFERENCES jobs(id),
-    path      TEXT NOT NULL,
-    duration  REAL,
-    type      TEXT NOT NULL DEFAULT 'match'
+    id         TEXT PRIMARY KEY,
+    jobId      TEXT NOT NULL REFERENCES jobs(id),
+    path       TEXT NOT NULL,
+    duration   REAL,
+    type       TEXT NOT NULL DEFAULT 'match',
+    extracting INTEGER NOT NULL DEFAULT 0
   );
 `)
 
-// Migrate existing DBs that lack the type column
-try {
-  await db.execute(`ALTER TABLE files ADD COLUMN type TEXT NOT NULL DEFAULT 'match'`)
-} catch {
-  // column already exists — safe to ignore
+// Migrate existing DBs
+for (const sql of [
+  `ALTER TABLE files ADD COLUMN type TEXT NOT NULL DEFAULT 'match'`,
+  `ALTER TABLE files ADD COLUMN extracting INTEGER NOT NULL DEFAULT 0`,
+]) {
+  try { await db.execute(sql) } catch { /* column already exists */ }
 }
+
+// Clear stale extracting flags left by a previous crash
+await db.execute(`UPDATE files SET extracting = 0 WHERE extracting = 1`)

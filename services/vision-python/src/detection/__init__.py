@@ -25,9 +25,10 @@ _MIN_MATCH_SEC = 600.0  # Dota games are always > 10 min
 
 _HL_FPS           = 2      # sample rate for highlight scan
 _HL_DIFF_THRESH   = 0.06   # fraction of kill-feed pixels that must change
-_HL_PAD_BEFORE    = 15.0   # seconds before first event in cluster
-_HL_PAD_AFTER     = 15.0   # seconds after last event in cluster
-_HL_MERGE_GAP     = 20.0   # merge clusters whose gap is smaller than this
+_HL_PAD_BEFORE    = 10.0   # seconds before first event in cluster
+_HL_PAD_AFTER     = 20.0   # seconds after last event in cluster
+_HL_MERGE_GAP     = 10.0   # merge clusters whose gap is smaller than this
+_HL_MAX_DUR       = 80.0   # hard cap per highlight clip
 
 
 @dataclass(frozen=True)
@@ -166,7 +167,7 @@ def run_detection(video_path: str, job_id: str = "", progress_url: str = "") -> 
     return matches
 
 
-def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "") -> list[Highlight]:
+def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "", max_duration: float | None = None) -> list[Highlight]:
     probe = subprocess.run(
         [FFPROBE, "-print_format", "json", "-show_format", "-show_streams",
          "-select_streams", "v:0", video_path],
@@ -215,18 +216,20 @@ def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "") -> 
         logger.info("job=%s match=%d no highlights", job_id, match_num)
         return []
 
+    cap = max_duration if max_duration is not None else _HL_MAX_DUR
+
     windows: list[tuple[float, float]] = []
     ws = max(0.0, events[0] - _HL_PAD_BEFORE)
     we = min(duration, events[0] + _HL_PAD_AFTER)
     for t in events[1:]:
         ns = max(0.0, t - _HL_PAD_BEFORE)
         ne = min(duration, t + _HL_PAD_AFTER)
-        if ns <= we + _HL_MERGE_GAP:
+        if ns <= we + _HL_MERGE_GAP and (we - ws) < cap:
             we = max(we, ne)
         else:
-            windows.append((ws, we))
+            windows.append((ws, min(we, ws + cap)))
             ws, we = ns, ne
-    windows.append((ws, we))
+    windows.append((ws, min(we, ws + cap)))
 
     result = [Highlight(i + 1, match_num, _seconds_to_ts(s), _seconds_to_ts(e)) for i, (s, e) in enumerate(windows)]
     logger.info("job=%s match=%d highlights=%d", job_id, match_num, len(result))
