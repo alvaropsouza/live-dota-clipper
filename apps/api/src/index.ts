@@ -1,6 +1,6 @@
 import Fastify from "fastify"
 import pino from "pino"
-import { access, rm, writeFile, readdir } from "node:fs/promises"
+import { access, rm, writeFile } from "node:fs/promises"
 import { createReadStream, statSync } from "node:fs"
 import { spawn } from "node:child_process"
 import path from "node:path"
@@ -121,7 +121,7 @@ app.get("/jobs/:id/thumbnail", async (request, reply) => {
   return reply.type("image/jpeg").send(createReadStream(thumbPath))
 })
 
-app.get("/jobs/:id/files", async (request, reply) => {
+app.get("/jobs/:id/files", async (request) => {
   const { id } = request.params as { id: string }
   const result = await db.execute({ sql: `SELECT * FROM files WHERE jobId = ? ORDER BY path`, args: [id] })
   return result.rows.map((r) => ({
@@ -134,8 +134,10 @@ app.get("/jobs/:id/files", async (request, reply) => {
 
 app.get("/jobs/:id/output/:filename/thumb", async (request, reply) => {
   const { id, filename } = request.params as { id: string; filename: string }
-  const filePath = path.join(TMP_DIR, `job-${id}`, "output", filename)
-  const thumbPath = path.join(TMP_DIR, `job-${id}`, `thumb_${filename}.jpg`)
+  const row = await db.execute({ sql: `SELECT path FROM files WHERE jobId = ? AND path LIKE ?`, args: [id, `%${filename}`] })
+  if (!row.rows[0]) return reply.code(404).send({ error: "not found" })
+  const filePath = row.rows[0]['path'] as string
+  const thumbPath = path.join(path.dirname(filePath), `thumb_${filename}.jpg`)
 
   try {
     await access(filePath)
@@ -144,14 +146,16 @@ app.get("/jobs/:id/output/:filename/thumb", async (request, reply) => {
   }
 
   try { await access(thumbPath) } catch {
-    await new Promise<void>((resolve, reject) => {
+    const generated = await new Promise<boolean>((resolve) => {
       const proc = spawn(FFMPEG, [
-        "-ss", "00:00:30", "-i", filePath,
-        "-frames:v", "1", "-q:v", "4", "-y", thumbPath,
+        "-ss", "00:00:05", "-i", filePath,
+        "-frames:v", "1", "-q:v", "3", "-vf", "scale=320:-1",
+        "-y", thumbPath,
       ])
-      proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`)))
-      proc.on("error", reject)
+      proc.on("close", (code) => resolve(code === 0))
+      proc.on("error", () => resolve(false))
     })
+    if (!generated) return reply.code(404).send({ error: "thumb generation failed" })
   }
 
   return reply.type("image/jpeg").send(createReadStream(thumbPath))
@@ -159,7 +163,9 @@ app.get("/jobs/:id/output/:filename/thumb", async (request, reply) => {
 
 app.get("/jobs/:id/output/:filename", async (request, reply) => {
   const { id, filename } = request.params as { id: string; filename: string }
-  const filePath = path.join(TMP_DIR, `job-${id}`, "output", filename)
+  const row = await db.execute({ sql: `SELECT path FROM files WHERE jobId = ? AND path LIKE ?`, args: [id, `%${filename}`] })
+  if (!row.rows[0]) return reply.code(404).send({ error: "not found" })
+  const filePath = row.rows[0].path as string
   try {
     await access(filePath)
     const stat = statSync(filePath)

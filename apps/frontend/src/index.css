@@ -1,56 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
 
-  /* Light mode */
-  --bg:            oklch(1.000 0.000 0);
-  --surface:       oklch(0.968 0.000 0);
-  --surface-2:     oklch(0.942 0.000 0);
-  --border:        oklch(0.872 0.000 0);
-  --ink:           oklch(0.140 0.000 0);
-  --muted:         oklch(0.480 0.000 0);
-  --dim:           oklch(0.680 0.000 0);
+  /* Discord dark palette */
+  --bg:            #313338;
+  --surface:       #2b2d31;
+  --surface-2:     #232428;
+  --border:        #1a1b1e;
+  --ink:           #f2f3f5;
+  --muted:         #b5bac1;
+  --dim:           #9ba0ab;
 
-  --primary:       oklch(0.540 0.185 160);
-  --primary-hover: oklch(0.490 0.185 160);
-  --primary-muted: oklch(0.936 0.040 160);
-  --primary-fg:    oklch(1.000 0.000 0);
+  --primary:       #5865f2;
+  --primary-hover: #4752c4;
+  --primary-muted: #1e2044;
+  --primary-fg:    #ffffff;
 
-  --accent:        oklch(0.640 0.155 45);
-  --accent-muted:  oklch(0.960 0.040 45);
-  --accent-fg:     oklch(1.000 0.000 0);
+  --accent:        #23a55a;
+  --accent-muted:  #162c22;
+  --accent-fg:     #ffffff;
 
-  --error:         oklch(0.530 0.215 25);
-  --error-muted:   oklch(0.960 0.040 25);
-  --error-fg:      oklch(1.000 0.000 0);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:            oklch(0.095 0.000 0);
-    --surface:       oklch(0.138 0.000 0);
-    --surface-2:     oklch(0.178 0.000 0);
-    --border:        oklch(0.238 0.000 0);
-    --ink:           oklch(0.930 0.000 0);
-    --muted:         oklch(0.540 0.000 0);
-    --dim:           oklch(0.360 0.000 0);
-
-    --primary:       oklch(0.650 0.185 160);
-    --primary-hover: oklch(0.710 0.185 160);
-    --primary-muted: oklch(0.175 0.040 160);
-    --primary-fg:    oklch(1.000 0.000 0);
-
-    --accent:        oklch(0.750 0.145 45);
-    --accent-muted:  oklch(0.185 0.040 45);
-    --accent-fg:     oklch(1.000 0.000 0);
-
-    --error:         oklch(0.620 0.210 25);
-    --error-muted:   oklch(0.185 0.040 25);
-    --error-fg:      oklch(1.000 0.000 0);
-  }
+  --error:         #f23f43;
+  --error-muted:   #2c1416;
+  --error-fg:      #ffffff;
 }
 
 *,
@@ -59,10 +36,14 @@
   box-sizing: border-box;
 }
 
+html, body, #root {
+  height: 100%;
+}
+
 body {
-  background-color: var(--bg);
+  background-color: var(--surface-2);
   color: var(--ink);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: 'Figtree', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -78,7 +59,20 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .step-ring {
-    animation: none;
-  }
+  .step-ring { animation: none; }
+}
+
+/* Discord-style scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--dim);
 }

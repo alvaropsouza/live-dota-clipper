@@ -1,5 +1,5 @@
 import { createClient } from "@libsql/client"
-import { mkdir, readFile, rm } from "node:fs/promises"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { spawn } from "node:child_process"
 import path from "node:path"
 import pino from "pino"
@@ -30,6 +30,22 @@ function runCut(input: string, start: string, end: string, output: string): Prom
       else reject(new Error(`ffmpeg exited ${String(code)}`))
     })
     proc.on("error", (err) => reject(new Error(`ffmpeg spawn: ${err.message}`)))
+  })
+}
+
+function probeDuration(filePath: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const proc = spawn("ffprobe", [
+      "-v", "error", "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1", filePath,
+    ])
+    let out = ""
+    proc.stdout.on("data", (d: Buffer) => { out += d.toString() })
+    proc.on("close", () => {
+      const n = parseFloat(out.trim())
+      resolve(isNaN(n) ? null : n)
+    })
+    proc.on("error", () => resolve(null))
   })
 }
 
@@ -64,15 +80,24 @@ async function poll() {
 
     await mkdir(outputDir, { recursive: true })
 
+    const metadata: Array<{ match: number; start: string; end: string; file: string; duration: number | null }> = []
+
     for (const m of matches) {
       const outputPath = path.join(outputDir, `match${String(m.match).padStart(3, "0")}.mp4`)
       logger.info({ jobId, match: m.match, start: m.start, end: m.end }, "cutting")
       await runCut(path.join(jobDir, "video.mp4"), m.start, m.end, outputPath)
+      const duration = await probeDuration(outputPath)
       await db.execute({
-        sql: `INSERT INTO files (id, jobId, path) VALUES (?, ?, ?)`,
-        args: [crypto.randomUUID(), jobId, outputPath],
+        sql: `INSERT INTO files (id, jobId, path, duration) VALUES (?, ?, ?, ?)`,
+        args: [crypto.randomUUID(), jobId, outputPath, duration],
       })
+      metadata.push({ match: m.match, start: m.start, end: m.end, file: path.basename(outputPath), duration })
     }
+
+    await writeFile(
+      path.join(outputDir, "metadata.json"),
+      JSON.stringify({ jobId, matches: metadata }, null, 2),
+    )
 
     logger.info({ jobId, cuts: matches.length }, "cutting complete")
     await db.execute({
