@@ -23,9 +23,23 @@ _SCALE_H = 270
 _DEBOUNCE_SEC = 30.0
 _MIN_MATCH_SEC = 600.0  # Dota games are always > 10 min
 
+_HL_FPS           = 2      # sample rate for highlight scan
+_HL_DIFF_THRESH   = 0.06   # fraction of kill-feed pixels that must change
+_HL_PAD_BEFORE    = 15.0   # seconds before first event in cluster
+_HL_PAD_AFTER     = 15.0   # seconds after last event in cluster
+_HL_MERGE_GAP     = 20.0   # merge clusters whose gap is smaller than this
+
 
 @dataclass(frozen=True)
 class Match:
+    match: int
+    start: str
+    end: str
+
+
+@dataclass(frozen=True)
+class Highlight:
+    highlight: int
     match: int
     start: str
     end: str
@@ -150,3 +164,70 @@ def run_detection(video_path: str, job_id: str = "", progress_url: str = "") -> 
     _report_progress(progress_url, 100)
     logger.info("detection done: %d matches", len(matches))
     return matches
+
+
+def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "") -> list[Highlight]:
+    probe = subprocess.run(
+        [FFPROBE, "-print_format", "json", "-show_format", "-show_streams",
+         "-select_streams", "v:0", video_path],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {probe.stderr.strip()}")
+    info = json.loads(probe.stdout)
+    duration = float(info["format"].get("duration", 0))
+
+    proc = subprocess.Popen(
+        [FFMPEG, "-i", video_path,
+         "-vf", f"fps={_HL_FPS},scale={_SCALE_W}:{_SCALE_H}",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+
+    frame_size = _SCALE_W * _SCALE_H * 3
+    # Kill feed: top-right corner (normalized)
+    kf_x1 = int(0.68 * _SCALE_W)
+    kf_y2 = int(0.14 * _SCALE_H)
+
+    events: list[float] = []
+    prev_gray: np.ndarray | None = None
+    frame_idx = 0
+
+    assert proc.stdout is not None
+    while True:
+        raw = proc.stdout.read(frame_size)
+        if len(raw) < frame_size:
+            break
+        t = frame_idx / _HL_FPS
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape((_SCALE_H, _SCALE_W, 3))
+        gray = cv2.cvtColor(frame[0:kf_y2, kf_x1:_SCALE_W], cv2.COLOR_BGR2GRAY)
+        if prev_gray is not None:
+            diff = cv2.absdiff(gray, prev_gray)
+            if np.count_nonzero(diff > 20) / diff.size > _HL_DIFF_THRESH:
+                events.append(t)
+                logger.debug("job=%s match=%d kill event %.1fs", job_id, match_num, t)
+        prev_gray = gray
+        frame_idx += 1
+
+    proc.wait()
+
+    if not events:
+        logger.info("job=%s match=%d no highlights", job_id, match_num)
+        return []
+
+    windows: list[tuple[float, float]] = []
+    ws = max(0.0, events[0] - _HL_PAD_BEFORE)
+    we = min(duration, events[0] + _HL_PAD_AFTER)
+    for t in events[1:]:
+        ns = max(0.0, t - _HL_PAD_BEFORE)
+        ne = min(duration, t + _HL_PAD_AFTER)
+        if ns <= we + _HL_MERGE_GAP:
+            we = max(we, ne)
+        else:
+            windows.append((ws, we))
+            ws, we = ns, ne
+    windows.append((ws, we))
+
+    result = [Highlight(i + 1, match_num, _seconds_to_ts(s), _seconds_to_ts(e)) for i, (s, e) in enumerate(windows)]
+    logger.info("job=%s match=%d highlights=%d", job_id, match_num, len(result))
+    return result

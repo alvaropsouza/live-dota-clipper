@@ -26,7 +26,7 @@ type Job = {
   finishedAt?: string
   progress: number
 }
-type CutFile = { id: string; path: string; name: string; url: string }
+type CutFile = { id: string; path: string; name: string; type: string; url: string }
 
 function youtubeThumb(url: string): { max: string; fallback: string } | null {
   try {
@@ -398,54 +398,73 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
             ) : null
           })()}
 
-          {files && files.length > 0 && (
-            <>
-              <p className="text-[11px] font-medium text-muted mb-2.5">
-                {files.length} partida{files.length !== 1 ? "s" : ""} detectada{files.length !== 1 ? "s" : ""}
-              </p>
-              <div
-                className="grid gap-2"
-                style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}
+          {files && files.length > 0 && (() => {
+            const matches    = files.filter((f) => f.type !== "highlight")
+            const highlights = files.filter((f) => f.type === "highlight")
+
+            const FileCard = ({ f, label, badge }: { f: CutFile; label: string; badge: string }) => (
+              <a
+                key={f.id}
+                href={f.url}
+                download={f.name}
+                className="group flex flex-col overflow-hidden rounded-lg border border-border hover:border-primary transition-colors duration-150 hover:-translate-y-px"
+                style={{ transitionProperty: "border-color, transform", transitionDuration: "150ms" }}
               >
-                {files.map((f, i) => (
-                  <a
-                    key={f.id}
-                    href={f.url}
-                    download={f.name}
-                    className="group flex flex-col overflow-hidden rounded-lg border border-border hover:border-primary transition-colors duration-150 hover:-translate-y-px"
-                    style={{ transitionProperty: "border-color, transform", transitionDuration: "150ms" }}
-                  >
-                    {/* Thumbnail */}
-                    <div className="relative h-16 overflow-hidden" style={{ background: "var(--surface-2)" }}>
-                      <img
-                        src={`/api/jobs/${jobId}/output/${f.name}/thumb`}
-                        alt={`Partida ${i + 1}`}
-                        loading="lazy"
-                        className="absolute inset-0 w-full h-full object-cover"
-                      />
-                      <div
-                        className="absolute inset-0"
-                        style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }}
-                      />
-                      {/* Match number */}
-                      <span className="absolute bottom-1.5 left-2 text-[15px] font-black text-white leading-none">
-                        {i + 1}
-                      </span>
-                      {/* Download overlay */}
-                      <div className="absolute inset-0 flex items-center justify-center bg-primary opacity-0 group-hover:opacity-90 transition-opacity duration-150">
-                        <span className="text-[11px] font-semibold text-primary-fg">⬇ Baixar</span>
-                      </div>
+                <div className="relative h-16 overflow-hidden" style={{ background: "var(--surface-2)" }}>
+                  <img
+                    src={`/api/jobs/${jobId}/output/${f.name}/thumb`}
+                    alt={label}
+                    loading="lazy"
+                    className="absolute inset-0 w-full h-full object-cover"
+                  />
+                  <div
+                    className="absolute inset-0"
+                    style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }}
+                  />
+                  <span className="absolute bottom-1.5 left-2 text-[15px] font-black text-white leading-none">
+                    {badge}
+                  </span>
+                  <div className="absolute inset-0 flex items-center justify-center bg-primary opacity-0 group-hover:opacity-90 transition-opacity duration-150">
+                    <span className="text-[11px] font-semibold text-primary-fg">⬇ Baixar</span>
+                  </div>
+                </div>
+                <div className="px-2 py-1.5 bg-surface">
+                  <p className="text-[11px] font-medium text-ink">{label}</p>
+                  <p className="text-[10px] text-muted truncate">{f.name}</p>
+                </div>
+              </a>
+            )
+
+            return (
+              <>
+                {matches.length > 0 && (
+                  <>
+                    <p className="text-[11px] font-medium text-muted mb-2.5">
+                      {matches.length} partida{matches.length !== 1 ? "s" : ""} detectada{matches.length !== 1 ? "s" : ""}
+                    </p>
+                    <div className="grid gap-2 mb-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}>
+                      {matches.map((f, i) => (
+                        <FileCard key={f.id} f={f} label={`Partida ${i + 1}`} badge={String(i + 1)} />
+                      ))}
                     </div>
-                    {/* Label */}
-                    <div className="px-2 py-1.5 bg-surface">
-                      <p className="text-[11px] font-medium text-ink">Partida {i + 1}</p>
-                      <p className="text-[10px] text-muted truncate">{f.name}</p>
+                  </>
+                )}
+
+                {highlights.length > 0 && (
+                  <>
+                    <p className="text-[11px] font-medium text-muted mb-2.5">
+                      {highlights.length} highlight{highlights.length !== 1 ? "s" : ""}
+                    </p>
+                    <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}>
+                      {highlights.map((f, i) => (
+                        <FileCard key={f.id} f={f} label={`Highlight ${i + 1}`} badge={`H${i + 1}`} />
+                      ))}
                     </div>
-                  </a>
-                ))}
-              </div>
-            </>
-          )}
+                  </>
+                )}
+              </>
+            )
+          })()}
         </div>
       )}
     </div>

@@ -24,6 +24,14 @@ await db.executeMultiple(`
     id        TEXT PRIMARY KEY,
     jobId     TEXT NOT NULL REFERENCES jobs(id),
     path      TEXT NOT NULL,
-    duration  REAL
+    duration  REAL,
+    type      TEXT NOT NULL DEFAULT 'match'
   );
 `)
+
+// Migrate existing DBs that lack the type column
+try {
+  await db.execute(`ALTER TABLE files ADD COLUMN type TEXT NOT NULL DEFAULT 'match'`)
+} catch {
+  // column already exists — safe to ignore
+}

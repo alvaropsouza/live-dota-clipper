@@ -13,6 +13,7 @@ const logger = pino({
 const DB_PATH = path.resolve(process.env["DB_PATH"] ?? "./data/app.db")
 const TMP_DIR = path.resolve(process.env["TMP_DIR"] ?? "../../data/tmp")
 const FFMPEG = process.env["FFMPEG_PATH"] ?? "ffmpeg"
+const PYTHON_URL = process.env["PYTHON_URL"] ?? "http://localhost:8000"
 
 await mkdir(path.dirname(DB_PATH), { recursive: true })
 const db = createClient({ url: `file:${DB_PATH}` })
@@ -21,6 +22,26 @@ await db.executeMultiple("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;
 logger.info({ dbPath: DB_PATH, tmpDir: TMP_DIR }, "worker ready")
 
 type MatchEntry = { match: number; start: string; end: string }
+type HighlightEntry = { highlight: number; match: number; start: string; end: string }
+
+async function detectHighlights(matchPath: string, matchNum: number, jobId: string): Promise<HighlightEntry[]> {
+  try {
+    const res = await fetch(`${PYTHON_URL}/detect-highlights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoPath: matchPath, matchNum, jobId }),
+    })
+    if (!res.ok) {
+      logger.warn({ jobId, matchNum, status: res.status }, "highlight detection failed, skipping")
+      return []
+    }
+    const data = await res.json() as { highlights: HighlightEntry[] }
+    return data.highlights ?? []
+  } catch (err) {
+    logger.warn({ jobId, matchNum, err: (err as Error).message }, "highlight detection error, skipping")
+    return []
+  }
+}
 
 function runCut(input: string, start: string, end: string, output: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -81,6 +102,7 @@ async function poll() {
     await mkdir(outputDir, { recursive: true })
 
     const metadata: Array<{ match: number; start: string; end: string; file: string; duration: number | null }> = []
+    const hlDir = path.join(outputDir, "highlights")
 
     for (const m of matches) {
       const outputPath = path.join(outputDir, `match${String(m.match).padStart(3, "0")}.mp4`)
@@ -88,10 +110,27 @@ async function poll() {
       await runCut(path.join(jobDir, "video.mp4"), m.start, m.end, outputPath)
       const duration = await probeDuration(outputPath)
       await db.execute({
-        sql: `INSERT INTO files (id, jobId, path, duration) VALUES (?, ?, ?, ?)`,
+        sql: `INSERT INTO files (id, jobId, path, duration, type) VALUES (?, ?, ?, ?, 'match')`,
         args: [crypto.randomUUID(), jobId, outputPath, duration],
       })
       metadata.push({ match: m.match, start: m.start, end: m.end, file: path.basename(outputPath), duration })
+
+      const highlights = await detectHighlights(outputPath, m.match, jobId)
+      if (highlights.length > 0) {
+        await mkdir(hlDir, { recursive: true })
+        for (const hl of highlights) {
+          const hlName = `match${String(m.match).padStart(3, "0")}_hl${String(hl.highlight).padStart(3, "0")}.mp4`
+          const hlPath = path.join(hlDir, hlName)
+          logger.info({ jobId, match: m.match, highlight: hl.highlight, start: hl.start, end: hl.end }, "cutting highlight")
+          await runCut(outputPath, hl.start, hl.end, hlPath)
+          const hlDuration = await probeDuration(hlPath)
+          await db.execute({
+            sql: `INSERT INTO files (id, jobId, path, duration, type) VALUES (?, ?, ?, ?, 'highlight')`,
+            args: [crypto.randomUUID(), jobId, hlPath, hlDuration],
+          })
+        }
+        logger.info({ jobId, match: m.match, count: highlights.length }, "highlights cut")
+      }
     }
 
     await writeFile(

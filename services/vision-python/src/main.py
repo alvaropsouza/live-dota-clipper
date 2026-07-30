@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
-from detection import Match, run_detection
+from detection import Highlight, Match, detect_highlights, run_detection
 
 
 class Settings(BaseSettings):
@@ -80,3 +80,33 @@ async def process(request: Request, body: ProcessRequest) -> dict[str, str]:
     asyncio.create_task(_run_and_callback(body))
     logger.info("detection started for %s", body.jobId)
     return {"status": "accepted"}
+
+
+class HighlightRequest(BaseModel):
+    videoPath: str
+    matchNum: int = 1
+    jobId: str = ""
+
+
+class HighlightResult(BaseModel):
+    highlight: int
+    match: int
+    start: str
+    end: str
+
+
+class HighlightResponse(BaseModel):
+    highlights: list[HighlightResult]
+
+
+@app.post("/detect-highlights")
+async def detect_highlights_endpoint(body: HighlightRequest) -> HighlightResponse:
+    highlights: list[Highlight] = await asyncio.to_thread(
+        detect_highlights, body.videoPath, body.matchNum, body.jobId
+    )
+    return HighlightResponse(
+        highlights=[
+            HighlightResult(highlight=h.highlight, match=h.match, start=h.start, end=h.end)
+            for h in highlights
+        ]
+    )

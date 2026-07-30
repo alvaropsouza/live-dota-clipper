@@ -128,6 +128,7 @@ app.get("/jobs/:id/files", async (request) => {
     id: r.id,
     path: r.path,
     name: path.basename(r.path as string),
+    type: r.type ?? "match",
     url: `/api/jobs/${id}/output/${path.basename(r.path as string)}`,
   }))
 })
