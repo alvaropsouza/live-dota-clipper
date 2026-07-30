@@ -4,15 +4,28 @@ import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tansta
 const queryClient = new QueryClient()
 
 const PIPELINE = [
-  { status: "pending",       label: "Aguardando" },
-  { status: "downloading",   label: "Baixando" },
-  { status: "preprocessing", label: "Pré-processando" },
-  { status: "detecting",     label: "Detectando partidas" },
-  { status: "cutting",       label: "Cortando vídeo" },
-  { status: "done",          label: "Concluído" },
+  { status: "pending",       label: "Fila"     },
+  { status: "downloading",   label: "Download" },
+  { status: "preprocessing", label: "Análise"  },
+  { status: "detecting",     label: "Detecção" },
+  { status: "cutting",       label: "Corte"    },
+  { status: "done",          label: "Pronto"   },
 ] as const
 
-type Job = { id: string; status: string; url: string; createdAt: string; finishedAt?: string; progress: number }
+const RETRYABLE_STEPS = [
+  { status: "pending",       label: "Do download" },
+  { status: "preprocessing", label: "Da detecção" },
+  { status: "cutting",       label: "Do corte"    },
+] as const
+
+type Job = {
+  id: string
+  status: string
+  url: string
+  createdAt: string
+  finishedAt?: string
+  progress: number
+}
 type CutFile = { id: string; path: string; name: string; url: string }
 
 function youtubeThumb(url: string): string | null {
@@ -49,66 +62,177 @@ function saveJobIds(ids: string[]) {
   localStorage.setItem("jobIds", JSON.stringify(ids))
 }
 
+function CheckIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+      <path d="M1.5 5L4 7.5L8.5 2.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function XMarkIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
+      <path d="M2 2L7 7M7 2L2 7" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function statusLabel(status: string): string {
+  const map: Record<string, string> = {
+    pending:       "Aguardando",
+    downloading:   "Baixando",
+    preprocessing: "Analisando",
+    detecting:     "Detectando",
+    cutting:       "Cortando",
+    done:          "Concluído",
+    failed:        "Falhou",
+  }
+  return map[status] ?? status
+}
+
+function StatusChip({ status }: { status: string }) {
+  let cls = "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium "
+  if (status === "done")   cls += "bg-primary-muted text-primary"
+  else if (status === "failed") cls += "bg-error-muted text-error"
+  else if (status === "pending") cls += "bg-surface-2 text-muted"
+  else cls += "bg-accent-muted text-accent"
+  return <span className={cls}>{statusLabel(status)}</span>
+}
+
 function PipelineBar({ status, progress }: { status: string; progress: number }) {
-  const currentIdx = PIPELINE.findIndex((s) => s.status === status)
   const failed = status === "failed"
+  const allDone = status === "done"
+  const currentIdx = PIPELINE.findIndex((s) => s.status === status)
+  const hasProgress = (status === "downloading" || status === "detecting") && progress > 0
 
   return (
-    <div className="mt-3 space-y-2">
-      <div className="flex items-center gap-1">
+    <div className="mt-4">
+      {/* Step nodes with connectors */}
+      <div className="flex items-start">
         {PIPELINE.map((step, i) => {
-          const done = !failed && i < currentIdx
-          const active = !failed && i === currentIdx
+          const isDone    = !failed && (allDone || i < currentIdx)
+          const isActive  = !failed && !allDone && i === currentIdx
+
+          // Connector before this node (i > 0): filled when step i-1 is done
+          const connFilled = !failed && (allDone || i <= currentIdx)
+          const connColor  = failed ? "var(--error)" : connFilled ? "var(--primary)" : "var(--border)"
+
+          // Node appearance
+          let nodeBg     = "var(--surface-2)"
+          let nodeBorder = "var(--border)"
+          let labelColor = "var(--dim)"
+          if (failed)   { nodeBg = "var(--error-muted)";   nodeBorder = "var(--error)";   labelColor = "var(--error)" }
+          else if (isDone)  { nodeBg = "var(--primary)";       nodeBorder = "var(--primary)"; labelColor = "var(--primary)" }
+          else if (isActive){ nodeBg = "var(--primary-muted)"; nodeBorder = "var(--primary)"; labelColor = "var(--ink)" }
+
           return (
-            <div key={step.status} className="flex flex-1 flex-col items-center gap-1">
-              <div className={[
-                "h-1.5 w-full rounded-full",
-                done   ? "bg-green-500" :
-                active ? "bg-blue-500 animate-pulse" :
-                failed ? "bg-red-400" :
-                         "bg-gray-200",
-              ].join(" ")} />
-              <span className={[
-                "text-[10px] leading-tight text-center",
-                active ? "font-semibold text-blue-600" :
-                done   ? "text-green-600" :
-                failed ? "text-red-500" :
-                         "text-gray-400",
-              ].join(" ")}>
-                {step.label}
-              </span>
+            <div key={step.status} className="flex items-start flex-1 min-w-0">
+              {/* Connector */}
+              {i > 0 && (
+                <div className="flex-1 pt-[9px]">
+                  <div
+                    style={{ height: 1.5, backgroundColor: connColor, transition: "background-color 0.3s" }}
+                  />
+                </div>
+              )}
+
+              {/* Node + label */}
+              <div className="flex flex-col items-center shrink-0">
+                <div className="relative" style={{ width: 20, height: 20 }}>
+                  {/* Pulsing ring for active state */}
+                  {isActive && (
+                    <div
+                      className="step-ring absolute rounded-full"
+                      style={{
+                        inset: -4,
+                        border: "1.5px solid var(--primary)",
+                        pointerEvents: "none",
+                      }}
+                    />
+                  )}
+                  {/* Circle */}
+                  <div
+                    className="relative z-10 flex items-center justify-center rounded-full"
+                    style={{
+                      width: 20,
+                      height: 20,
+                      backgroundColor: nodeBg,
+                      border: `2px solid ${nodeBorder}`,
+                      color: isDone ? "var(--primary-fg)" : failed ? "var(--error-fg)" : nodeBorder,
+                      transition: "background-color 0.2s, border-color 0.2s",
+                    }}
+                  >
+                    {isDone  && <CheckIcon />}
+                    {isActive && <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: "var(--primary)" }} />}
+                    {failed  && <XMarkIcon />}
+                  </div>
+                </div>
+
+                {/* Label */}
+                <span
+                  className="mt-1.5 text-center block"
+                  style={{
+                    fontSize: 9,
+                    lineHeight: 1.2,
+                    fontWeight: isActive ? 600 : 400,
+                    color: labelColor,
+                    maxWidth: 44,
+                    transition: "color 0.2s",
+                  }}
+                >
+                  {step.label}
+                </span>
+
+                {/* Progress % under label for active + trackable steps */}
+                {isActive && progress > 0 && (
+                  <span
+                    className="block mt-0.5"
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 700,
+                      fontVariantNumeric: "tabular-nums",
+                      color: "var(--primary)",
+                    }}
+                  >
+                    {progress}%
+                  </span>
+                )}
+              </div>
             </div>
           )
         })}
       </div>
 
-      {(status === "downloading" || status === "detecting") && progress > 0 && (
-        <div className="space-y-0.5">
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
-            <div
-              className="h-full rounded-full bg-blue-500 transition-all duration-500"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <p className="text-right text-[10px] text-blue-600">{progress}%</p>
+      {/* Slim progress track below pipeline for downloadable/detectable states */}
+      {hasProgress && (
+        <div
+          className="mt-3 rounded-full overflow-hidden"
+          style={{ height: 2, backgroundColor: "var(--border)" }}
+        >
+          <div
+            style={{
+              height: "100%",
+              width: `${progress}%`,
+              backgroundColor: "var(--primary)",
+              borderRadius: 2,
+              transition: "width 0.5s ease",
+            }}
+          />
         </div>
       )}
     </div>
   )
 }
 
-const RETRYABLE_STEPS = [
-  { status: "pending",       label: "Download" },
-  { status: "preprocessing", label: "Detecção" },
-  { status: "cutting",       label: "Corte" },
-] as const
-
 function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
   const [showRetryMenu, setShowRetryMenu] = useState(false)
+
   const { data, isError } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => fetchJob(jobId),
-    refetchInterval: (q) => (q.state.data?.status === "done" || q.state.data?.status === "failed") ? false : 3000,
+    refetchInterval: (q) =>
+      q.state.data?.status === "done" || q.state.data?.status === "failed" ? false : 3000,
   })
 
   const { data: files } = useQuery({
@@ -144,103 +268,143 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
     },
   })
 
-  return (
-    <div className="rounded border bg-white p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-2">
-        <p className="truncate text-sm text-gray-700">{data?.url ?? jobId}</p>
-        <div className="relative flex shrink-0 items-center gap-2">
-          <span className={[
-            "rounded-full px-2 py-0.5 text-xs font-medium",
-            data?.status === "done"   ? "bg-green-100 text-green-700" :
-            data?.status === "failed" ? "bg-red-100 text-red-700" :
-            isError                   ? "bg-red-100 text-red-700" :
-                                        "bg-blue-100 text-blue-700",
-          ].join(" ")}>
-            {isError ? "erro" : (data?.status ?? "...")}
-          </span>
-          {data && data.status !== "pending" && (
-            <div className="relative">
-              <button
-                onClick={() => setShowRetryMenu((v) => !v)}
-                disabled={retryMutation.isPending}
-                className="text-xs text-blue-500 hover:text-blue-700 disabled:opacity-50"
-                title="Reiniciar a partir de..."
-              >
-                ↺
-              </button>
-              {showRetryMenu && (
-                <div className="absolute right-0 top-5 z-10 w-36 rounded border bg-white shadow-lg">
-                  <p className="border-b px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase">Reiniciar a partir de</p>
-                  {RETRYABLE_STEPS.map((step) => (
-                    <button
-                      key={step.status}
-                      onClick={() => retryMutation.mutate(step.status)}
-                      className="block w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50"
-                    >
-                      {step.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          <button
-            onClick={() => deleteMutation.mutate()}
-            disabled={deleteMutation.isPending}
-            className="text-xs text-gray-400 hover:text-red-500 disabled:opacity-50"
-            title="Eliminar job"
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-      <p className="mt-1 font-mono text-[10px] text-gray-400">{jobId}</p>
-      {data && <PipelineBar status={data.status} progress={data.progress} />}
+  const status = isError ? "failed" : (data?.status ?? "pending")
+  const isDone = status === "done"
 
-      {data?.status === "done" && (
-        <div className="mt-4 space-y-4">
+  return (
+    <div
+      className="rounded-xl border border-border bg-surface overflow-hidden"
+    >
+      {/* Header */}
+      <div className="p-4">
+        <div className="flex items-start justify-between gap-2">
+          {/* URL */}
+          <p className="text-sm text-ink truncate flex-1 min-w-0 leading-snug">
+            {data?.url ?? jobId}
+          </p>
+
+          {/* Actions */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <StatusChip status={status} />
+
+            {/* Retry */}
+            {data && data.status !== "pending" && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowRetryMenu((v) => !v)}
+                  disabled={retryMutation.isPending}
+                  title="Reiniciar a partir de..."
+                  className="flex items-center justify-center w-6 h-6 rounded-md border border-border bg-transparent text-muted hover:text-ink hover:border-ink transition-colors duration-150 disabled:opacity-40 text-sm"
+                >
+                  ↺
+                </button>
+                {showRetryMenu && (
+                  <div
+                    className="absolute right-0 top-7 z-20 rounded-lg border border-border bg-surface overflow-hidden"
+                    style={{ minWidth: 160, boxShadow: "0 8px 24px oklch(0 0 0 / 0.18)" }}
+                  >
+                    <p className="px-3 py-2 text-[10px] font-semibold text-muted border-b border-border">
+                      Reiniciar a partir de
+                    </p>
+                    {RETRYABLE_STEPS.map((step) => (
+                      <button
+                        key={step.status}
+                        onClick={() => retryMutation.mutate(step.status)}
+                        className="block w-full px-3 py-2 text-left text-xs text-ink bg-transparent hover:bg-surface-2 transition-colors duration-100"
+                      >
+                        {step.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Delete */}
+            <button
+              onClick={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending}
+              title="Remover job"
+              className="flex items-center justify-center w-6 h-6 rounded-md border border-transparent text-dim hover:text-error hover:bg-error-muted hover:border-error-muted transition-colors duration-150 disabled:opacity-40 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* Job ID */}
+        <p className="mt-1 font-mono text-[10px] text-dim">
+          {jobId}
+        </p>
+
+        {/* Pipeline */}
+        {data && <PipelineBar status={data.status} progress={data.progress} />}
+      </div>
+
+      {/* Done state: thumbnail + files */}
+      {isDone && (
+        <div className="border-t border-border px-4 pb-4 pt-4">
           {(() => {
-            const thumb = data.url ? youtubeThumb(data.url) : null
+            const thumb = data?.url ? youtubeThumb(data.url) : null
             return thumb ? (
-              <div className="relative h-40 overflow-hidden rounded-lg">
-                <img src={thumb} alt="thumbnail" className="absolute inset-0 h-full w-full object-cover" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
-                <span className="absolute bottom-2 left-3 text-xs font-semibold text-white drop-shadow">VOD completa</span>
+              <div className="relative h-28 rounded-lg overflow-hidden mb-4">
+                <img src={thumb} alt="thumbnail da VOD" className="absolute inset-0 w-full h-full object-cover" />
+                <div className="absolute inset-0" style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.65) 0%, transparent 55%)" }} />
+                <span className="absolute bottom-2.5 left-3 text-xs font-semibold text-white">
+                  VOD completa
+                </span>
               </div>
             ) : null
           })()}
 
           {files && files.length > 0 && (
-            <div>
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
-                {files.length} partida{files.length !== 1 ? "s" : ""} cortada{files.length !== 1 ? "s" : ""}
+            <>
+              <p className="text-[11px] font-medium text-muted mb-2.5">
+                {files.length} partida{files.length !== 1 ? "s" : ""} detectada{files.length !== 1 ? "s" : ""}
               </p>
-              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
+              <div
+                className="grid gap-2"
+                style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}
+              >
                 {files.map((f, i) => (
                   <a
                     key={f.id}
                     href={f.url}
                     download={f.name}
-                    className="group relative flex flex-col overflow-hidden rounded-lg border border-gray-200 transition hover:border-blue-400 hover:shadow-md"
+                    className="group flex flex-col overflow-hidden rounded-lg border border-border hover:border-primary transition-colors duration-150 hover:-translate-y-px"
+                    style={{ transitionProperty: "border-color, transform", transitionDuration: "150ms" }}
                   >
+                    {/* Thumbnail */}
                     <div
-                      className="relative flex h-24 items-end justify-start bg-cover bg-center bg-gradient-to-br from-indigo-900 to-blue-800"
-                      style={{ backgroundImage: `url(/api/jobs/${jobId}/output/${f.name}/thumb)` }}
+                      className="relative h-16 bg-surface-2"
+                      style={{
+                        backgroundImage: `url(/api/jobs/${jobId}/output/${f.name}/thumb)`,
+                        backgroundSize: "cover",
+                        backgroundPosition: "center",
+                      }}
                     >
-                      <div className="absolute inset-0 bg-black/40" />
-                      <span className="relative z-10 px-2 pb-1.5 text-2xl font-black text-white drop-shadow">#{i + 1}</span>
+                      <div
+                        className="absolute inset-0"
+                        style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }}
+                      />
+                      {/* Match number */}
+                      <span className="absolute bottom-1.5 left-2 text-[15px] font-black text-white leading-none">
+                        {i + 1}
+                      </span>
+                      {/* Download overlay */}
+                      <div className="absolute inset-0 flex items-center justify-center bg-primary opacity-0 group-hover:opacity-90 transition-opacity duration-150">
+                        <span className="text-[11px] font-semibold text-primary-fg">⬇ Baixar</span>
+                      </div>
                     </div>
-                    <div className="bg-white px-2 py-1.5">
-                      <p className="text-[11px] font-medium text-gray-700">Partida {i + 1}</p>
-                      <p className="truncate text-[10px] text-gray-400">{f.name}</p>
-                    </div>
-                    <div className="absolute inset-0 flex items-center justify-center bg-blue-600/80 opacity-0 transition group-hover:opacity-100">
-                      <span className="text-sm font-semibold text-white">⬇ Baixar</span>
+                    {/* Label */}
+                    <div className="px-2 py-1.5 bg-surface">
+                      <p className="text-[11px] font-medium text-ink">Partida {i + 1}</p>
+                      <p className="text-[10px] text-muted truncate">{f.name}</p>
                     </div>
                   </a>
                 ))}
               </div>
-            </div>
+            </>
           )}
         </div>
       )}
@@ -263,68 +427,107 @@ function App() {
   })
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <h1 className="text-2xl font-bold">Dota VOD Processor</h1>
-      <p className="mt-1 text-sm text-gray-500">Cole o link da VOD para separar as partidas</p>
-
-      <form
-        className="mt-6 flex gap-2"
-        onSubmit={(e) => {
-          e.preventDefault()
-          if (url.trim()) mutation.mutate(url.trim())
-        }}
-      >
-        <input
-          type="url"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://www.youtube.com/watch?v=..."
-          className="flex-1 rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          required
+    <div className="min-h-screen bg-bg">
+      {/* Top bar */}
+      <header className="border-b border-border bg-surface px-5 py-3 flex items-center gap-2.5">
+        <div
+          className="w-5 h-5 rounded-md shrink-0"
+          style={{ backgroundColor: "var(--primary)" }}
         />
-        <button
-          type="submit"
-          disabled={mutation.isPending}
-          className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {mutation.isPending ? "Enviando..." : "Processar"}
-        </button>
-      </form>
+        <span className="text-sm font-semibold text-ink">Dota VOD Processor</span>
+      </header>
 
-      {mutation.isError && (
-        <p className="mt-2 text-sm text-red-600">Erro: {(mutation.error as Error).message}</p>
-      )}
-
-      {jobIds.length > 0 && (
-        <div className="mt-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-600">Jobs</h2>
-            <button
-              onClick={async () => {
-                await Promise.allSettled(
-                  jobIds.map((id) => fetch(`/api/jobs/${id}`, { method: "DELETE" }))
-                )
-                setJobIds([])
-                saveJobIds([])
+      <main className="max-w-[680px] mx-auto px-4 py-8">
+        {/* Input card */}
+        <div className="rounded-xl border border-border bg-surface p-5 mb-6">
+          <h1 className="text-[15px] font-semibold text-ink mb-1">Processar VOD</h1>
+          <p className="text-[13px] text-muted mb-4">
+            Cole o link da transmissão para separar as partidas automaticamente
+          </p>
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (url.trim()) mutation.mutate(url.trim())
+            }}
+          >
+            <input
+              type="url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=..."
+              required
+              className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-border bg-bg text-ink placeholder:text-dim outline-none focus:border-primary transition-colors duration-150"
+              style={{
+                ["--tw-ring-color" as string]: "var(--primary-muted)",
               }}
-              className="text-xs text-gray-400 hover:text-red-500"
-            >
-              limpar lista
-            </button>
-          </div>
-          {jobIds.map((id) => (
-            <JobCard
-              key={id}
-              jobId={id}
-              onDelete={() => {
-                const updated = jobIds.filter((j) => j !== id)
-                setJobIds(updated)
-                saveJobIds(updated)
+              onFocus={(e) => {
+                e.currentTarget.style.boxShadow = "0 0 0 3px var(--primary-muted)"
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.boxShadow = "none"
               }}
             />
-          ))}
+            <button
+              type="submit"
+              disabled={mutation.isPending}
+              className="shrink-0 px-4 py-2 text-sm font-medium rounded-lg border-none cursor-pointer disabled:cursor-not-allowed transition-colors duration-150"
+              style={{
+                backgroundColor: mutation.isPending ? "var(--primary-muted)" : "var(--primary)",
+                color: mutation.isPending ? "var(--primary)" : "var(--primary-fg)",
+              }}
+            >
+              {mutation.isPending ? "Enviando..." : "Processar"}
+            </button>
+          </form>
+          {mutation.isError && (
+            <p className="mt-2 text-xs text-error">
+              {(mutation.error as Error).message}
+            </p>
+          )}
         </div>
-      )}
+
+        {/* Jobs */}
+        {jobIds.length > 0 && (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-muted">Jobs recentes</span>
+              <button
+                onClick={async () => {
+                  await Promise.allSettled(
+                    jobIds.map((id) => fetch(`/api/jobs/${id}`, { method: "DELETE" }))
+                  )
+                  setJobIds([])
+                  saveJobIds([])
+                }}
+                className="text-xs text-dim hover:text-error bg-transparent border-none cursor-pointer transition-colors duration-150"
+              >
+                limpar lista
+              </button>
+            </div>
+            <div className="flex flex-col gap-2.5">
+              {jobIds.map((id) => (
+                <JobCard
+                  key={id}
+                  jobId={id}
+                  onDelete={() => {
+                    const updated = jobIds.filter((j) => j !== id)
+                    setJobIds(updated)
+                    saveJobIds(updated)
+                  }}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Empty state */}
+        {jobIds.length === 0 && (
+          <div className="text-center py-16">
+            <p className="text-sm text-dim">Cole um link acima para começar.</p>
+          </div>
+        )}
+      </main>
     </div>
   )
 }

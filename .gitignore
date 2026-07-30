@@ -1,4 +1,6 @@
 node_modules/
+.playwright-mcp/
+.impeccable/
 dist/
 .env
 tmp/
