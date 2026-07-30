@@ -4,6 +4,7 @@ dist/
 tmp/
 data/
 *.mp4
+debug-frames/
 __pycache__/
 .venv/
 .ruff_cache/

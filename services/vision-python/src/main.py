@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
@@ -25,6 +26,8 @@ app = FastAPI(title="vision-python")
 
 class ProcessRequest(BaseModel):
     videoPath: str
+    jobId: str = ""
+    progressUrl: str = ""
 
 
 class MatchResult(BaseModel):
@@ -42,10 +45,38 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.post("/process")
-async def process(body: ProcessRequest) -> ProcessResponse:
-    logger.info("processing %s", body.videoPath)
-    matches: list[Match] = run_detection(body.videoPath)
-    return ProcessResponse(
-        matches=[MatchResult(match=m.match, start=m.start, end=m.end) for m in matches]
-    )
+async def _run_and_callback(body: ProcessRequest) -> None:
+    try:
+        matches = await asyncio.to_thread(run_detection, body.videoPath, body.jobId, body.progressUrl)
+        payload = {"matches": [{"match": m.match, "start": m.start, "end": m.end} for m in matches]}
+        import urllib.request, json as _json
+        data = _json.dumps(payload).encode()
+        req = urllib.request.Request(
+            body.progressUrl.replace("/progress", "/complete"),
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        logger.info("detection complete, callback sent for %s", body.jobId)
+    except Exception as exc:
+        logger.error("detection failed for %s: %s", body.jobId, exc)
+        import urllib.request, json as _json
+        data = _json.dumps({"error": str(exc)}).encode()
+        req = urllib.request.Request(
+            body.progressUrl.replace("/progress", "/complete"),
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10)
+        except Exception:
+            pass
+
+
+@app.post("/process", status_code=202)
+async def process(request: Request, body: ProcessRequest) -> dict[str, str]:
+    asyncio.create_task(_run_and_callback(body))
+    logger.info("detection started for %s", body.jobId)
+    return {"status": "accepted"}

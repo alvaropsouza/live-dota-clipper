@@ -4,13 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "cross-env DB_PATH=../../data/app.db TMP_DIR=../../data/tmp tsx watch src/index.ts",
     "build": "tsup src/index.ts --format esm",
     "lint": "eslint src/"
   },
   "dependencies": {
     "@dota-vod/shared": "workspace:*",
-    "bullmq": "^5.0.0",
+    "@libsql/client": "^0.14.0",
     "pino": "^9.0.0"
   },
   "devDependencies": {

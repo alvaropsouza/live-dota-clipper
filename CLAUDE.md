@@ -14,6 +14,10 @@ Toda documentação fica em `docs/`. Sempre referenciar arquivos de lá.
 - [Python Best Practices](./docs/python.md)
 - [Plano do Projeto](./plan.md)
 
+## Regras absolutas
+
+- **Nunca aceitar deprecações.** Se uma API está deprecated, usar a alternativa correta imediatamente. Nunca usar `// TODO fix later` ou comentários que normalizam o uso de código deprecated.
+
 ## Arquitetura
 
 ```
