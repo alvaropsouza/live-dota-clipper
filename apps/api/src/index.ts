@@ -32,6 +32,11 @@ app.post("/process", async (request, reply) => {
   return reply.code(202).send({ jobId })
 })
 
+app.get("/jobs", async (_request, reply) => {
+  const result = await db.execute({ sql: `SELECT * FROM jobs ORDER BY createdAt DESC`, args: [] })
+  return reply.send(result.rows)
+})
+
 app.get("/jobs/:id", async (request, reply) => {
   const { id } = request.params as { id: string }
   const result = await db.execute({ sql: `SELECT * FROM jobs WHERE id = ?`, args: [id] })

@@ -53,14 +53,6 @@ async function fetchJob(jobId: string): Promise<Job> {
   return res.json() as Promise<Job>
 }
 
-function loadJobIds(): string[] {
-  try { return JSON.parse(localStorage.getItem("jobIds") ?? "[]") as string[] }
-  catch { return [] }
-}
-
-function saveJobIds(ids: string[]) {
-  localStorage.setItem("jobIds", JSON.stringify(ids))
-}
 
 function CheckIcon() {
   return (
@@ -264,7 +256,7 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
     },
     onSuccess: () => {
       setShowRetryMenu(false)
-      queryClient.invalidateQueries({ queryKey: ["job", jobId] })
+      void queryClient.invalidateQueries({ queryKey: ["job", jobId] })
     },
   })
 
@@ -414,14 +406,23 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
 
 function App() {
   const [url, setUrl] = useState("")
-  const [jobIds, setJobIds] = useState<string[]>(loadJobIds)
+
+  const { data: jobs = [], refetch: refetchJobs } = useQuery({
+    queryKey: ["jobs"],
+    queryFn: async (): Promise<Job[]> => {
+      const res = await fetch("/api/jobs")
+      if (!res.ok) throw new Error(await res.text())
+      return res.json() as Promise<Job[]>
+    },
+    refetchInterval: 5000,
+  })
+
+  const jobIds = jobs.map((j) => j.id)
 
   const mutation = useMutation({
     mutationFn: submitVod,
-    onSuccess: (data) => {
-      const updated = [data.jobId, ...jobIds]
-      setJobIds(updated)
-      saveJobIds(updated)
+    onSuccess: () => {
+      void refetchJobs()
       setUrl("")
     },
   })
@@ -437,96 +438,90 @@ function App() {
         <span className="text-sm font-semibold text-ink">Dota VOD Processor</span>
       </header>
 
-      <main className="max-w-[680px] mx-auto px-4 py-8">
-        {/* Input card */}
-        <div className="rounded-xl border border-border bg-surface p-5 mb-6">
-          <h1 className="text-[15px] font-semibold text-ink mb-1">Processar VOD</h1>
-          <p className="text-[13px] text-muted mb-4">
-            Cole o link da transmissão para separar as partidas automaticamente
-          </p>
-          <form
-            className="flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (url.trim()) mutation.mutate(url.trim())
-            }}
-          >
-            <input
-              type="url"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://www.youtube.com/watch?v=..."
-              required
-              className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-border bg-bg text-ink placeholder:text-dim outline-none focus:border-primary transition-colors duration-150"
-              style={{
-                ["--tw-ring-color" as string]: "var(--primary-muted)",
-              }}
-              onFocus={(e) => {
-                e.currentTarget.style.boxShadow = "0 0 0 3px var(--primary-muted)"
-              }}
-              onBlur={(e) => {
-                e.currentTarget.style.boxShadow = "none"
-              }}
-            />
-            <button
-              type="submit"
-              disabled={mutation.isPending}
-              className="shrink-0 px-4 py-2 text-sm font-medium rounded-lg border-none cursor-pointer disabled:cursor-not-allowed transition-colors duration-150"
-              style={{
-                backgroundColor: mutation.isPending ? "var(--primary-muted)" : "var(--primary)",
-                color: mutation.isPending ? "var(--primary)" : "var(--primary-fg)",
+      <main className="max-w-[1200px] mx-auto px-4 py-8 lg:grid lg:gap-8" style={{ gridTemplateColumns: "360px 1fr" }}>
+        {/* Left column: input */}
+        <div className="lg:sticky lg:top-8 lg:self-start mb-6 lg:mb-0">
+          <div className="rounded-xl border border-border bg-surface p-5">
+            <h1 className="text-[15px] font-semibold text-ink mb-1">Processar VOD</h1>
+            <p className="text-[13px] text-muted mb-4">
+              Cole o link da transmissão para separar as partidas automaticamente
+            </p>
+            <form
+              className="flex flex-col gap-2"
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (url.trim()) mutation.mutate(url.trim())
               }}
             >
-              {mutation.isPending ? "Enviando..." : "Processar"}
-            </button>
-          </form>
-          {mutation.isError && (
-            <p className="mt-2 text-xs text-error">
-              {(mutation.error as Error).message}
-            </p>
-          )}
+              <input
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://www.youtube.com/watch?v=..."
+                required
+                className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-bg text-ink placeholder:text-dim outline-none focus:border-primary transition-colors duration-150"
+                onFocus={(e) => {
+                  e.currentTarget.style.boxShadow = "0 0 0 3px var(--primary-muted)"
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.boxShadow = "none"
+                }}
+              />
+              <button
+                type="submit"
+                disabled={mutation.isPending}
+                className="w-full px-4 py-2 text-sm font-medium rounded-lg border-none cursor-pointer disabled:cursor-not-allowed transition-colors duration-150"
+                style={{
+                  backgroundColor: mutation.isPending ? "var(--primary-muted)" : "var(--primary)",
+                  color: mutation.isPending ? "var(--primary)" : "var(--primary-fg)",
+                }}
+              >
+                {mutation.isPending ? "Enviando..." : "Processar"}
+              </button>
+            </form>
+            {mutation.isError && (
+              <p className="mt-2 text-xs text-error">
+                {(mutation.error as Error).message}
+              </p>
+            )}
+          </div>
         </div>
 
-        {/* Jobs */}
-        {jobIds.length > 0 && (
-          <>
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-muted">Jobs recentes</span>
-              <button
-                onClick={async () => {
-                  await Promise.allSettled(
-                    jobIds.map((id) => fetch(`/api/jobs/${id}`, { method: "DELETE" }))
-                  )
-                  setJobIds([])
-                  saveJobIds([])
-                }}
-                className="text-xs text-dim hover:text-error bg-transparent border-none cursor-pointer transition-colors duration-150"
-              >
-                limpar lista
-              </button>
-            </div>
-            <div className="flex flex-col gap-2.5">
-              {jobIds.map((id) => (
-                <JobCard
-                  key={id}
-                  jobId={id}
-                  onDelete={() => {
-                    const updated = jobIds.filter((j) => j !== id)
-                    setJobIds(updated)
-                    saveJobIds(updated)
+        {/* Right column: jobs */}
+        <div>
+          {jobIds.length > 0 && (
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-medium text-muted">Jobs recentes</span>
+                <button
+                  onClick={() => {
+                    void Promise.allSettled(
+                      jobIds.map((id) => fetch(`/api/jobs/${id}`, { method: "DELETE" }))
+                    ).then(() => refetchJobs())
                   }}
-                />
-              ))}
-            </div>
-          </>
-        )}
+                  className="text-xs text-dim hover:text-error bg-transparent border-none cursor-pointer transition-colors duration-150"
+                >
+                  limpar lista
+                </button>
+              </div>
+              <div className="flex flex-col gap-2.5">
+                {jobIds.map((id) => (
+                  <JobCard
+                    key={id}
+                    jobId={id}
+                    onDelete={() => void refetchJobs()}
+                  />
+                ))}
+              </div>
+            </>
+          )}
 
-        {/* Empty state */}
-        {jobIds.length === 0 && (
-          <div className="text-center py-16">
-            <p className="text-sm text-dim">Cole um link acima para começar.</p>
-          </div>
-        )}
+          {jobIds.length === 0 && (
+            <div className="flex items-center justify-center h-full min-h-[200px]">
+              <p className="text-sm text-dim">Cole um link ao lado para começar.</p>
+            </div>
+          )}
+        </div>
       </main>
     </div>
   )
