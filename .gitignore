@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+tmp/
+data/
+*.mp4
+__pycache__/
+.venv/
+.ruff_cache/
+*.pyc
+*.pyo
+.mypy_cache/

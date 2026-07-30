@@ -1,0 +1,20 @@
+{
+  "name": "@dota-vod/worker-cutter",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/index.ts --format esm",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@dota-vod/shared": "workspace:*",
+    "bullmq": "^5.0.0",
+    "pino": "^9.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0"
+  }
+}
