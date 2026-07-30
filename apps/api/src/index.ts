@@ -4,12 +4,19 @@ import { access, rm, writeFile } from "node:fs/promises"
 import { createReadStream, statSync } from "node:fs"
 import { spawn } from "node:child_process"
 import path from "node:path"
+import { Agent, setGlobalDispatcher } from "undici"
 import { ProcessRequestSchema } from "@dota-vod/shared"
 import { db } from "@/db"
+
+setGlobalDispatcher(new Agent({ headersTimeout: 0, bodyTimeout: 0 }))
 
 const TMP_DIR = path.resolve(process.env["TMP_DIR"] ?? "../../data/tmp")
 const FFMPEG = process.env["FFMPEG_PATH"] ?? "ffmpeg"
 const PYTHON_URL = process.env["PYTHON_URL"] ?? "http://localhost:8000"
+const API_PORT = process.env["API_PORT"] ?? "3000"
+
+const hlProgress = new Map<string, number>()
+const cancelRequested = new Set<string>()
 
 const logger = pino({
   name: "api",
@@ -131,8 +138,16 @@ app.get("/jobs/:id/files", async (request) => {
     name: path.basename(r.path as string),
     type: r.type ?? "match",
     extracting: r.extracting === 1,
+    hlProgress: hlProgress.get(r.id as string) ?? null,
     url: `/api/jobs/${id}/output/${path.basename(r.path as string)}`,
   }))
+})
+
+app.patch("/jobs/:id/files/:fileId/hl-progress", async (request, reply) => {
+  const { fileId } = request.params as { id: string; fileId: string }
+  const { progress } = request.body as { progress: number }
+  hlProgress.set(fileId, progress)
+  return reply.code(204).send()
 })
 
 app.get("/jobs/:id/output/:filename/thumb", async (request, reply) => {
@@ -215,7 +230,7 @@ app.delete("/jobs/:id/files/:fileId", async (request, reply) => {
 
 app.post("/jobs/:id/files/:fileId/detect-highlights", async (request, reply) => {
   const { id, fileId } = request.params as { id: string; fileId: string }
-  const { maxDuration } = (request.body ?? {}) as { maxDuration?: number }
+  const { maxDuration, minKills } = (request.body ?? {}) as { maxDuration?: number; minKills?: number }
 
   const row = await db.execute({
     sql: `SELECT * FROM files WHERE id = ? AND jobId = ? AND type = 'match'`,
@@ -228,27 +243,36 @@ app.post("/jobs/:id/files/:fileId/detect-highlights", async (request, reply) => 
   const matchNum = parseInt(path.basename(filePath).replace("match", "").replace(".mp4", ""), 10) || 1
 
   await db.execute({ sql: `UPDATE files SET extracting = 1 WHERE id = ?`, args: [fileId] })
+  hlProgress.set(fileId, 0)
+
+  const progressUrl = `http://localhost:${API_PORT}/jobs/${id}/files/${fileId}/hl-progress`
 
   let highlights: Array<{ highlight: number; match: number; start: string; end: string }>
   try {
     const pyRes = await fetch(`${PYTHON_URL}/detect-highlights`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ videoPath: filePath, matchNum, jobId: id, maxDuration }),
+      body: JSON.stringify({ videoPath: filePath, matchNum, jobId: id, maxDuration, minKills, progressUrl }),
     })
     if (!pyRes.ok) {
       const text = await pyRes.text()
       await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+      hlProgress.delete(fileId)
       return reply.code(502).send({ error: `vision service: ${text}` })
     }
     const body = await pyRes.json() as { highlights: Array<{ highlight: number; match: number; start: string; end: string }> }
     highlights = body.highlights
   } catch (err) {
     await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+    hlProgress.delete(fileId)
     throw err
   }
 
-  if (highlights.length === 0) return reply.send({ highlights: [] })
+  if (highlights.length === 0) {
+    await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+    hlProgress.delete(fileId)
+    return reply.send({ highlights: [] })
+  }
 
   const hlDir = path.join(path.dirname(filePath), "highlights")
   await import("node:fs/promises").then((m) => m.mkdir(hlDir, { recursive: true }))
@@ -256,6 +280,11 @@ app.post("/jobs/:id/files/:fileId/detect-highlights", async (request, reply) => 
   const created: Array<{ id: string; name: string }> = []
 
   for (const hl of highlights) {
+    if (cancelRequested.has(fileId)) {
+      logger.info({ jobId: id, fileId }, "highlight extraction cancelled")
+      break
+    }
+
     const hlName = `match${String(matchNum).padStart(3, "0")}_hl${String(hl.highlight).padStart(3, "0")}.mp4`
     const hlPath = path.join(hlDir, hlName)
 
@@ -271,11 +300,20 @@ app.post("/jobs/:id/files/:fileId/detect-highlights", async (request, reply) => 
       args: [hlId, id, hlPath],
     })
     created.push({ id: hlId, name: hlName })
+    logger.info({ jobId: id, fileId, hlName }, "highlight clip ready")
   }
 
+  cancelRequested.delete(fileId)
   await db.execute({ sql: `UPDATE files SET extracting = 0 WHERE id = ?`, args: [fileId] })
+  hlProgress.delete(fileId)
   logger.info({ jobId: id, fileId, count: created.length }, "highlights extracted on demand")
   return reply.send({ highlights: created })
+})
+
+app.delete("/jobs/:id/files/:fileId/detect-highlights", async (request, reply) => {
+  const { fileId } = request.params as { id: string; fileId: string }
+  cancelRequested.add(fileId)
+  return reply.code(202).send()
 })
 
 app.delete("/jobs/:id", async (request, reply) => {

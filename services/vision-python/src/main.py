@@ -87,6 +87,8 @@ class HighlightRequest(BaseModel):
     matchNum: int = 1
     jobId: str = ""
     maxDuration: float | None = None
+    minKills: int = 2
+    progressUrl: str = ""
 
 
 class HighlightResult(BaseModel):
@@ -103,7 +105,7 @@ class HighlightResponse(BaseModel):
 @app.post("/detect-highlights")
 async def detect_highlights_endpoint(body: HighlightRequest) -> HighlightResponse:
     highlights: list[Highlight] = await asyncio.to_thread(
-        detect_highlights, body.videoPath, body.matchNum, body.jobId, body.maxDuration
+        detect_highlights, body.videoPath, body.matchNum, body.jobId, body.maxDuration, body.minKills, body.progressUrl
     )
     return HighlightResponse(
         highlights=[

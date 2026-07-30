@@ -26,7 +26,7 @@ type Job = {
   finishedAt?: string
   progress: number
 }
-type CutFile = { id: string; path: string; name: string; type: string; extracting: boolean; url: string }
+type CutFile = { id: string; path: string; name: string; type: string; extracting: boolean; hlProgress: number | null; url: string }
 
 function youtubeThumb(url: string): { max: string; fallback: string } | null {
   try {
@@ -262,6 +262,16 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
     staleTime: Infinity,
   })
 
+  const [selectedMatchIds, setSelectedMatchIds] = useState<Set<string>>(new Set())
+  const [extractStep, setExtractStep] = useState<{ current: number; total: number } | null>(null)
+  const [highlightDuration, setHighlightDuration] = useState(60)
+  const [minKills, setMinKills] = useState(2)
+  const [stopping, setStopping] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const cancelledRef = useRef(false)
+  const currentExtractingIdRef = useRef<string | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+
   const { data: files } = useQuery({
     queryKey: ["files", jobId],
     queryFn: async (): Promise<CutFile[]> => {
@@ -270,7 +280,7 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
       return res.json() as Promise<CutFile[]>
     },
     enabled: data?.status === "done",
-    refetchInterval: (q) => q.state.data?.some((f) => f.extracting) ? 2000 : false,
+    refetchInterval: (q) => (q.state.data?.some((f) => f.extracting) || extractStep !== null) ? 2000 : false,
   })
 
   const deleteMutation = useMutation({
@@ -296,31 +306,47 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
     },
   })
 
-  const [selectedMatchIds, setSelectedMatchIds] = useState<Set<string>>(new Set())
-  const [extractStep, setExtractStep] = useState<{ current: number; total: number } | null>(null)
-  const [highlightDuration, setHighlightDuration] = useState(60)
-
   const serverExtracting = files?.some((f) => f.extracting) ?? false
   const extracting = serverExtracting || extractStep !== null
 
+  async function stopExtraction() {
+    cancelledRef.current = true
+    setStopping(true)
+    abortControllerRef.current?.abort()
+    const fid = currentExtractingIdRef.current
+    if (fid) {
+      fetch(`/api/jobs/${jobId}/files/${fid}/detect-highlights`, { method: "DELETE" }).catch(() => {})
+    }
+  }
+
   async function extractHighlights() {
+    cancelledRef.current = false
+    setStopping(false)
     const ids = [...selectedMatchIds]
     setExtractStep({ current: 1, total: ids.length })
     for (let i = 0; i < ids.length; i++) {
+      if (cancelledRef.current) break
       setExtractStep({ current: i + 1, total: ids.length })
+      currentExtractingIdRef.current = ids[i]
+      const ac = new AbortController()
+      abortControllerRef.current = ac
       try {
         const res = await fetch(`/api/jobs/${jobId}/files/${ids[i]}/detect-highlights`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ maxDuration: highlightDuration }),
+          body: JSON.stringify({ maxDuration: highlightDuration, minKills }),
+          signal: ac.signal,
         })
         if (!res.ok) console.error(`highlight extraction failed for ${ids[i]}: ${await res.text()}`)
       } catch (e) {
-        console.error(e)
+        if ((e as Error).name !== "AbortError") console.error(e)
       }
       void queryClient.invalidateQueries({ queryKey: ["files", jobId] })
     }
     setExtractStep(null)
+    currentExtractingIdRef.current = null
+    abortControllerRef.current = null
+    setStopping(false)
     setSelectedMatchIds(new Set())
   }
 
@@ -406,6 +432,40 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
         {data && <PipelineBar status={data.status} progress={data.progress} />}
       </div>
 
+      {/* Video preview modal */}
+      {previewUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "oklch(0 0 0 / 0.88)" }}
+          onClick={() => setPreviewUrl(null)}
+        >
+          <div
+            className="relative"
+            style={{ maxWidth: "90vw" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setPreviewUrl(null)}
+              aria-label="Fechar"
+              style={{
+                position: "absolute", top: -14, right: -14,
+                width: 28, height: 28, borderRadius: "50%",
+                background: "var(--surface-2)", border: "1px solid var(--border)",
+                color: "var(--ink)", cursor: "pointer", fontSize: 12,
+                display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1,
+                fontFamily: "inherit",
+              }}
+            >✕</button>
+            <video
+              controls
+              autoPlay
+              src={previewUrl}
+              style={{ maxWidth: "100%", maxHeight: "80vh", borderRadius: 8, display: "block" }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Done state: thumbnail + files */}
       {isDone && (
         <div className="border-t border-border px-4 pb-4 pt-4">
@@ -450,33 +510,61 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
                       {(selectedMatchIds.size > 0 || extracting) && (
                         <div className="flex items-center gap-1.5">
                           {!extracting && (
-                            <div className="flex items-center gap-1 rounded-md border border-border px-2" style={{ background: "var(--surface-2)" }}>
-                              <label htmlFor="hl-dur" className="text-[10px] text-muted whitespace-nowrap">máx</label>
-                              <input
-                                id="hl-dur"
-                                type="number"
-                                min={20}
-                                max={300}
-                                value={highlightDuration}
-                                onChange={(e) => setHighlightDuration(Math.max(20, Math.min(300, Number(e.target.value))))}
-                                className="w-10 text-[11px] text-ink bg-transparent border-none outline-none text-right"
-                                style={{ fontFamily: "inherit" }}
-                              />
-                              <span className="text-[10px] text-muted">s</span>
-                            </div>
+                            <>
+                              <div className="flex items-center gap-1 rounded-md border border-border px-2" style={{ background: "var(--surface-2)" }}>
+                                <label htmlFor="hl-dur" className="text-[10px] text-muted whitespace-nowrap">máx</label>
+                                <input
+                                  id="hl-dur"
+                                  type="number"
+                                  min={20}
+                                  max={300}
+                                  value={highlightDuration}
+                                  onChange={(e) => setHighlightDuration(Number(e.target.value))}
+                                  onBlur={(e) => setHighlightDuration(Math.max(20, Math.min(300, Number(e.target.value))))}
+                                  className="w-10 text-[11px] text-ink bg-transparent border-none outline-none text-right"
+                                  style={{ fontFamily: "inherit" }}
+                                />
+                                <span className="text-[10px] text-muted">s</span>
+                              </div>
+                              <div className="flex items-center gap-1 rounded-md border border-border px-2" style={{ background: "var(--surface-2)" }}>
+                                <label htmlFor="hl-kills" className="text-[10px] text-muted whitespace-nowrap">kills</label>
+                                <input
+                                  id="hl-kills"
+                                  type="number"
+                                  min={1}
+                                  max={20}
+                                  value={minKills}
+                                  onChange={(e) => setMinKills(Number(e.target.value))}
+                                  onBlur={(e) => setMinKills(Math.max(1, Math.min(20, Number(e.target.value))))}
+                                  className="w-8 text-[11px] text-ink bg-transparent border-none outline-none text-right"
+                                  style={{ fontFamily: "inherit" }}
+                                />
+                                <span className="text-[10px] text-muted">mín</span>
+                              </div>
+                            </>
                           )}
-                          <button
-                            onClick={() => void extractHighlights()}
-                            disabled={extracting}
-                            className="text-[11px] font-semibold px-2.5 py-1 rounded-md transition-colors duration-150 disabled:opacity-80"
-                            style={{ background: "var(--primary)", color: "var(--primary-fg)", border: "none", cursor: extracting ? "default" : "pointer", fontFamily: "inherit" }}
-                          >
-                            {extractStep
-                              ? `✦ Extraindo ${extractStep.current}/${extractStep.total}…`
-                              : serverExtracting
-                              ? "✦ Extraindo…"
-                              : `✦ Extrair highlights (${selectedMatchIds.size})`}
-                          </button>
+                          {extracting ? (
+                            <button
+                              onClick={() => void stopExtraction()}
+                              disabled={stopping}
+                              className="text-[11px] font-semibold px-2.5 py-1 rounded-md transition-colors duration-150 disabled:opacity-60"
+                              style={{ background: "var(--error, #e53)", color: "white", border: "none", cursor: stopping ? "default" : "pointer", fontFamily: "inherit" }}
+                            >
+                              {stopping
+                                ? "Parando…"
+                                : extractStep
+                                ? `◼ Parar (${extractStep.current}/${extractStep.total})`
+                                : "◼ Parar"}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => void extractHighlights()}
+                              className="text-[11px] font-semibold px-2.5 py-1 rounded-md transition-colors duration-150"
+                              style={{ background: "var(--primary)", color: "var(--primary-fg)", border: "none", cursor: "pointer", fontFamily: "inherit" }}
+                            >
+                              {`✦ Extrair highlights (${selectedMatchIds.size})`}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -499,12 +587,33 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
                               <div className="absolute inset-0" style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }} />
                               <span className="absolute bottom-1.5 left-2 text-[15px] font-black text-white leading-none">{i + 1}</span>
                               {isActive && (
-                                <div className="absolute inset-0 flex flex-col items-center justify-center gap-1" style={{ background: "oklch(0 0 0 / 0.62)" }}>
-                                  <svg className="animate-spin" width="18" height="18" viewBox="0 0 18 18" fill="none">
-                                    <circle cx="9" cy="9" r="7" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
-                                    <path d="M9 2a7 7 0 0 1 7 7" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                                  </svg>
-                                  <span style={{ fontSize: 9, fontWeight: 700, color: "white", letterSpacing: "0.05em" }}>DETECTANDO</span>
+                                <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-3" style={{ background: "oklch(0 0 0 / 0.72)" }}>
+                                  {f.hlProgress !== null ? (
+                                    <>
+                                      <span style={{ fontSize: 9, fontWeight: 700, color: "white", letterSpacing: "0.05em" }}>
+                                        DETECTANDO {f.hlProgress}%
+                                      </span>
+                                      <div style={{ width: "100%", height: 3, background: "rgba(255,255,255,0.2)", borderRadius: 2, overflow: "hidden" }}>
+                                        <div style={{
+                                          height: "100%",
+                                          width: "100%",
+                                          background: "var(--primary)",
+                                          borderRadius: 2,
+                                          transform: `scaleX(${f.hlProgress / 100})`,
+                                          transformOrigin: "left",
+                                          transition: "transform 0.4s ease",
+                                        }} />
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <svg className="animate-spin" width="18" height="18" viewBox="0 0 18 18" fill="none">
+                                        <circle cx="9" cy="9" r="7" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
+                                        <path d="M9 2a7 7 0 0 1 7 7" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                      </svg>
+                                      <span style={{ fontSize: 9, fontWeight: 700, color: "white", letterSpacing: "0.05em" }}>DETECTANDO</span>
+                                    </>
+                                  )}
                                 </div>
                               )}
                               {!extracting && (
@@ -524,10 +633,16 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
                                 <p className="text-[11px] font-medium text-ink">Partida {i + 1}</p>
                                 <p className="text-[10px] text-muted truncate">{f.name}</p>
                               </div>
-                              <a href={f.url} download={f.name} aria-label="Baixar"
-                                className="shrink-0 text-dim hover:text-ink transition-colors duration-150"
-                                style={{ fontSize: 13 }}
-                              >⬇</a>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button onClick={() => setPreviewUrl(f.url)} aria-label="Pré-visualizar"
+                                  className="text-dim hover:text-ink transition-colors duration-150"
+                                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 0, fontFamily: "inherit" }}
+                                >▶</button>
+                                <a href={f.url} download={f.name} aria-label="Baixar"
+                                  className="shrink-0 text-dim hover:text-ink transition-colors duration-150"
+                                  style={{ fontSize: 13 }}
+                                >⬇</a>
+                              </div>
                             </div>
                           </div>
                         )
@@ -558,7 +673,12 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
                     <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))" }}>
                       {highlights.map((f, i) => (
                         <div key={f.id} className="group flex flex-col overflow-hidden rounded-lg border border-border hover:border-primary transition-colors duration-150">
-                          <a href={f.url} download={f.name} className="relative h-16 overflow-hidden block" style={{ background: "var(--surface-2)" }}>
+                          <button
+                            onClick={() => setPreviewUrl(f.url)}
+                            className="relative h-16 overflow-hidden w-full p-0"
+                            style={{ background: "var(--surface-2)", border: "none", cursor: "pointer" }}
+                            aria-label={`Pré-visualizar highlight ${i + 1}`}
+                          >
                             <img
                               src={`/api/jobs/${jobId}/output/${f.name}/thumb`}
                               alt={`Highlight ${i + 1}`}
@@ -567,24 +687,30 @@ function JobCard({ jobId, onDelete }: { jobId: string; onDelete: () => void }) {
                             />
                             <div className="absolute inset-0" style={{ background: "linear-gradient(to top, oklch(0 0 0 / 0.55) 0%, transparent 50%)" }} />
                             <span className="absolute bottom-1.5 left-2 text-[13px] font-black text-white leading-none">H{i + 1}</span>
-                            <div className="absolute inset-0 flex items-center justify-center bg-primary opacity-0 group-hover:opacity-90 transition-opacity duration-150">
-                              <span className="text-[11px] font-semibold text-primary-fg">⬇ Baixar</span>
+                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150" style={{ background: "oklch(0 0 0 / 0.5)" }}>
+                              <span style={{ fontSize: 22, color: "white" }}>▶</span>
                             </div>
-                          </a>
+                          </button>
                           <div className="px-2 py-1.5 bg-surface flex items-center justify-between gap-1">
                             <div className="min-w-0">
                               <p className="text-[11px] font-medium text-ink">Highlight {i + 1}</p>
                               <p className="text-[10px] text-muted truncate">{f.name}</p>
                             </div>
-                            <button
-                              onClick={async () => {
-                                await fetch(`/api/jobs/${jobId}/files/${f.id}`, { method: "DELETE" })
-                                void queryClient.invalidateQueries({ queryKey: ["files", jobId] })
-                              }}
-                              aria-label="Remover highlight"
-                              className="shrink-0 text-dim hover:text-error transition-colors duration-150"
-                              style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, padding: 0, fontFamily: "inherit" }}
-                            >✕</button>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <a href={f.url} download={f.name} aria-label="Baixar"
+                                className="text-dim hover:text-ink transition-colors duration-150"
+                                style={{ fontSize: 13 }}
+                              >⬇</a>
+                              <button
+                                onClick={async () => {
+                                  await fetch(`/api/jobs/${jobId}/files/${f.id}`, { method: "DELETE" })
+                                  void queryClient.invalidateQueries({ queryKey: ["files", jobId] })
+                                }}
+                                aria-label="Remover highlight"
+                                className="shrink-0 text-dim hover:text-error transition-colors duration-150"
+                                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, padding: 0, fontFamily: "inherit" }}
+                              >✕</button>
+                            </div>
                           </div>
                         </div>
                       ))}

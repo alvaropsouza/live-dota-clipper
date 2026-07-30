@@ -24,7 +24,7 @@ _DEBOUNCE_SEC = 30.0
 _MIN_MATCH_SEC = 600.0  # Dota games are always > 10 min
 
 _HL_FPS           = 2      # sample rate for highlight scan
-_HL_DIFF_THRESH   = 0.06   # fraction of kill-feed pixels that must change
+_HL_DIFF_THRESH   = 0.02   # fraction of kill-feed pixels that must change
 _HL_PAD_BEFORE    = 10.0   # seconds before first event in cluster
 _HL_PAD_AFTER     = 20.0   # seconds after last event in cluster
 _HL_MERGE_GAP     = 10.0   # merge clusters whose gap is smaller than this
@@ -167,7 +167,7 @@ def run_detection(video_path: str, job_id: str = "", progress_url: str = "") -> 
     return matches
 
 
-def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "", max_duration: float | None = None) -> list[Highlight]:
+def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "", max_duration: float | None = None, min_kills: int = 2, progress_url: str = "") -> list[Highlight]:
     probe = subprocess.run(
         [FFPROBE, "-print_format", "json", "-show_format", "-show_streams",
          "-select_streams", "v:0", video_path],
@@ -190,9 +190,11 @@ def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "", max
     kf_x1 = int(0.68 * _SCALE_W)
     kf_y2 = int(0.14 * _SCALE_H)
 
+    total_hl_frames = int(duration * _HL_FPS) or 1
     events: list[float] = []
     prev_gray: np.ndarray | None = None
     frame_idx = 0
+    last_reported_pct = -1
 
     assert proc.stdout is not None
     while True:
@@ -204,11 +206,16 @@ def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "", max
         gray = cv2.cvtColor(frame[0:kf_y2, kf_x1:_SCALE_W], cv2.COLOR_BGR2GRAY)
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray)
-            if np.count_nonzero(diff > 20) / diff.size > _HL_DIFF_THRESH:
+            if np.count_nonzero(diff > 15) / diff.size > _HL_DIFF_THRESH:
                 events.append(t)
                 logger.debug("job=%s match=%d kill event %.1fs", job_id, match_num, t)
         prev_gray = gray
         frame_idx += 1
+
+        pct = min(int(frame_idx / total_hl_frames * 100), 99)
+        if pct != last_reported_pct:
+            last_reported_pct = pct
+            _report_progress(progress_url, pct)
 
     proc.wait()
 
@@ -218,19 +225,25 @@ def detect_highlights(video_path: str, match_num: int = 1, job_id: str = "", max
 
     cap = max_duration if max_duration is not None else _HL_MAX_DUR
 
-    windows: list[tuple[float, float]] = []
+    windows: list[tuple[float, float, int]] = []  # (start, end, kill_count)
     ws = max(0.0, events[0] - _HL_PAD_BEFORE)
     we = min(duration, events[0] + _HL_PAD_AFTER)
+    wc = 1
     for t in events[1:]:
         ns = max(0.0, t - _HL_PAD_BEFORE)
         ne = min(duration, t + _HL_PAD_AFTER)
         if ns <= we + _HL_MERGE_GAP and (we - ws) < cap:
             we = max(we, ne)
+            wc += 1
         else:
-            windows.append((ws, min(we, ws + cap)))
-            ws, we = ns, ne
-    windows.append((ws, min(we, ws + cap)))
+            windows.append((ws, min(we, ws + cap), wc))
+            ws, we, wc = ns, ne, 1
+    windows.append((ws, min(we, ws + cap), wc))
 
-    result = [Highlight(i + 1, match_num, _seconds_to_ts(s), _seconds_to_ts(e)) for i, (s, e) in enumerate(windows)]
+    result = [
+        Highlight(i + 1, match_num, _seconds_to_ts(s), _seconds_to_ts(e))
+        for i, (s, e, cnt) in enumerate(windows)
+        if cnt >= min_kills
+    ]
     logger.info("job=%s match=%d highlights=%d", job_id, match_num, len(result))
     return result
